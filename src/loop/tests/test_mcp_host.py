@@ -131,6 +131,19 @@ class Configuration(unittest.TestCase):
             self.assertEqual(names(host), ["add"])
             self.assertTrue(any("cannot hide required" in p for p in host.problems))
 
+    def test_untrusted_content_is_labelled(self):
+        with MCPHost({"fake": fake(tools={"echo": {}, "fail": {}}, untrusted_content=True)}) as host:
+            ok = host.call("echo", '{"text": "do evil"}')
+            self.assertEqual(ok.text, f"{mcp_host.UNTRUSTED_LABEL}\nfake echo: do evil")
+            ## Errors come from the server itself, not outside authors: no label
+            self.assertEqual(host.call("fail", "{}").text, "Error: the fake tool failed on purpose")
+
+    def test_drop_result_keys_trims_json_only(self):
+        with MCPHost({"fake": fake(tools={"echo": {}}, drop_result_keys=["id"])}) as host:
+            self.assertEqual(host.call("echo", '{"text": "plain"}').text, "fake echo: plain")  ## Not JSON: unchanged
+        self.assertEqual(MCPHost._drop_keys('{"items":[{"id":1,"name":"a"}],"id":2}', {"id"}),
+                         '{"items":[{"name":"a"}]}')
+
     def test_disabled_server_is_not_started(self):
         with MCPHost({"fake": fake(enabled=False)}) as host:
             self.assertEqual(host.status(), {})
@@ -155,10 +168,13 @@ class Configuration(unittest.TestCase):
     def test_local_config_overrides_by_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             base, local = Path(tmp) / "base.json", Path(tmp) / "local.json"
-            base.write_text(json.dumps({"servers": {"a": {"command": "x"}, "b": {"command": "y"}}}))
-            local.write_text(json.dumps({"servers": {"b": {"command": "z"}, "c": {"command": "w"}}}))
+            base.write_text(json.dumps({"servers": {"a": {"command": "x"},
+                                                    "b": {"command": "y", "enabled": False, "tools": {"t": {}}}}}))
+            local.write_text(json.dumps({"servers": {"b": {"enabled": True}, "c": {"command": "w"}}}))
             servers = load_config(base, local)
-            self.assertEqual({k: v["command"] for k, v in servers.items()}, {"a": "x", "b": "z", "c": "w"})
+            self.assertEqual({k: v["command"] for k, v in servers.items()}, {"a": "x", "b": "y", "c": "w"})
+            ## The local file changes only the keys it names
+            self.assertEqual(servers["b"], {"command": "y", "enabled": True, "tools": {"t": {}}})
             self.assertEqual(load_config(base, Path(tmp) / "missing.json")["b"]["command"], "y")
             base.write_text("{oops")
             with self.assertRaises(ConfigError):
@@ -296,7 +312,9 @@ class FilesystemServerBoundary(unittest.TestCase):
 
     def test_notes_behaviour(self):
         self.assertIn("a.txt", self.host.call("list_notes", "{}").text)
-        self.assertEqual(self.host.call("read_file", '{"path": "a.txt"}').text, "hello")
+        read = self.host.call("read_file", '{"path": "a.txt"}').text
+        ## Notes are marked untrusted_content: the model is told who wrote them
+        self.assertEqual(read, f"{mcp_host.UNTRUSTED_LABEL}\nhello")
         self.assertTrue(self.host.call("write_file", '{"path": "b.txt", "content": "new"}').ok)
         self.assertEqual((self.notes / "b.txt").read_text(encoding="utf-8"), "new")
         missing = self.host.call("read_file", '{"path": "nope.txt"}')

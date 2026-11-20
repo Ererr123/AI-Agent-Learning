@@ -7,6 +7,7 @@
       "args": ["-y", "@modelcontextprotocol/server-filesystem@2.2.0", "{notes_dir}"],
       "cwd": "{notes_dir}",
       "log_payloads": true,
+      "untrusted_content": true,
       "tools": {
         "list_directory": {
           "name": "list_notes",
@@ -50,6 +51,42 @@
         },
         "list_memories": {},
         "current_time": {}
+      }
+    },
+    "github": {
+      "description": "Official GitHub MCP server v2.1.0 (github/github-mcp-server release binary, unzipped into tools/). Read-only four ways: read-only token permissions, --read-only, --tools, and the allowlist below. Off by default: enable in mcp_servers.local.json once the token is set.",
+      "enabled": false,
+      "command": "{root}/tools/github-mcp-server/github-mcp-server.exe",
+      "args": ["stdio", "--read-only", "--tools",
+               "get_me,search_repositories,get_file_contents,list_commits,list_issues,issue_read,list_pull_requests,pull_request_read"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${env:COCO_GITHUB_TOKEN}"},
+      "log_payloads": false,
+      "untrusted_content": true,
+      "drop_result_keys": ["id", "node_id", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
+                           "forks_count", "open_issues_count", "incomplete_results", "default_branch", "created_at"],
+      "tools": {
+        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login and profile. It does not list repositories: use search_repositories with 'user:<login>' for that."},
+        "search_repositories": {
+          "description": "Search GitHub repositories. To list the USER'S OWN repositories, first call github_whoami, then use the query 'user:<their login>'. Without user: this searches all of GitHub."
+        },
+        "get_file_contents": {},
+        "list_commits": {},
+        "list_issues": {},
+        "issue_read": {},
+        "list_pull_requests": {},
+        "pull_request_read": {}
+      }
+    },
+    "gmail": {
+      "description": "Coco's own read-only Gmail server (gmail_server.py). Requests only the gmail.readonly scope; credentials live in %APPDATA%\\coco, outside the repo. Off by default: enable in mcp_servers.local.json after running gmail_server.py --authorize.",
+      "enabled": false,
+      "command": "{python}",
+      "args": ["{here}/gmail_server.py"],
+      "log_payloads": false,
+      "untrusted_content": true,
+      "tools": {
+        "search_emails": {},
+        "read_email": {}
       }
     }
   }

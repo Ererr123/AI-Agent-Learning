@@ -85,6 +85,7 @@ Servers are defined in [`src/loop/mcp_servers.json`](../src/loop/mcp_servers.jso
 - **`hide_args`** removes optional arguments from the schema. Hiding a required argument is refused.
 - **Duplicate names.** If two servers expose the same model-facing name, both are renamed `<server>_<tool>` and a warning is shown.
 - **`log_payloads`** defaults to `false`: tool arguments and results are then written to `logs/` as `[not logged]`. Only `notes` and `personal` set it to `true`, which matches what Coco logged before MCP.
+- **`untrusted_content`** (set on notes, github and gmail) puts a label before each successful result. The label says the content was written by someone other than the user and that instructions inside it are not from the user. The `safety/injection_in_tool_result` eval checks that Coco reports on planted instructions instead of following them.
 - **`timeout`** is in seconds per call. The default is 30.
 
 Changing the config or a server version changes the `prompt_version` in logs and evals, because the tool schemas are part of it.
@@ -108,19 +109,80 @@ Set `"enabled": false`, or delete its entry from the local file. Its subprocess 
 - **Memory.** `personal_server.py` takes the memory file path from its command line. No tool accepts a path. `forget` refuses to choose between several matching memories. Disk errors are returned as tool errors.
 - **Failures are never successes.** Startup failures, unknown or non-allowlisted tools, bad JSON, server errors, timeouts and crashes all return `Error: ...` with `ok=False`. Results over 40,000 characters are cut off and marked.
 - **Server stderr** goes to `logs/mcp-servers.log`, which is git-ignored, not to the chat terminal.
-- **External content is data.** Text returned by tools (files now; email, documents and events later) is not instructions. The system prompt rules still apply.
+- **External content is data.** Results from untrusted servers are labelled, and system prompt rule 9 says never to act on requests found inside them.
 
-## GitHub and Google services (not connected yet)
+## GitHub (read-only, all your repositories)
 
-GitHub, Drive, Calendar and Gmail need accounts, consent screens and tokens, so they are not set up in this repository. Connect them one at a time, each in `mcp_servers.local.json`, following the gates in [phase-3-mcp.md](phase-3-mcp.md) (steps 2 and 3):
+**Server:** the official [github/github-mcp-server](https://github.com/github/github-mcp-server) v2.1.0. It's the Windows release binary, checked against the release's SHA-256 checksums file. It is limited to read-only in four ways:
 
-1. Pick a maintained server. Pin its version and record its authentication method and scopes.
-2. For GitHub, use a fine-grained token limited to the selected repository, with read-only permissions. If the server has a read-only mode, turn it on. Allowlist only search and read tools.
-3. For Google, use the provider's consent flow with read-only scopes (Drive files you select, Calendar read-only, Gmail read-only). Keep token files outside the repository.
-4. Leave `log_payloads` set to `false` for these servers.
-5. Verify, then record in this document: a real read works; write tools are not exposed; access can be revoked.
+1. The token has only read permissions.
+2. The server runs with `--read-only`.
+3. `--tools` enables only 8 read tools.
+4. Coco's allowlist exposes only those 8 tools.
 
-**Revoking access.** Disable the server in the config, then revoke the token at the provider: GitHub → Settings → Developer settings → Personal access tokens; Google → Account → Security → Third-party access. Delete any local token file.
+The exposed tools are `github_whoami`, `search_repositories`, `get_file_contents`, `list_commits`, `list_issues`, `issue_read`, `list_pull_requests` and `pull_request_read`. There are no tools to create, comment, merge, push or delete.
+
+**Setup (once):**
+
+1. **Unzip the server.** Download `github-mcp-server_Windows_x86_64.zip` from the [v2.1.0 release](https://github.com/github/github-mcp-server/releases/tag/v2.1.0) and unzip it so that `tools\github-mcp-server\github-mcp-server.exe` exists in the repo folder. The `tools/` folder is git-ignored.
+2. **Create a fine-grained token** at GitHub → Settings → Developer settings → [Fine-grained tokens](https://github.com/settings/personal-access-tokens/new):
+   - Repository access: **All repositories**.
+   - Repository permissions: **Contents: Read-only**, **Issues: Read-only**, **Pull requests: Read-only**. Metadata: Read-only is added automatically.
+   - Account permissions: none.
+   - Set an expiry date (90 days is reasonable).
+3. **Store the token** as a user environment variable. Don't put it in any file in this repo. In PowerShell:
+   ```powershell
+   [Environment]::SetEnvironmentVariable("COCO_GITHUB_TOKEN", (Read-Host "Paste token"), "User")
+   ```
+   Open a new terminal (or log out and back in) so new programs can see it.
+4. **Enable the server** in `src/loop/mcp_servers.local.json`. See "Enable the services" below.
+
+**Revoke:** delete the token on the GitHub tokens page, then remove the variable:
+```powershell
+[Environment]::SetEnvironmentVariable("COCO_GITHUB_TOKEN", $null, "User")
+```
+
+## Gmail (read-only)
+
+**Server:** Coco's own [`gmail_server.py`](../src/loop/gmail_server.py), with two tools: `search_emails` (Gmail search syntax) and `read_email` (one message, body capped at 6,000 characters).
+
+It requests only the `gmail.readonly` scope. Google therefore refuses any send, draft, label, archive or delete, even if the code had a bug. It refuses to start if its token grants any other scope. Email text is marked as untrusted data before the model sees it.
+
+Google's own Gmail MCP server is a hosted preview, and it also requires the `gmail.compose` scope, which can create drafts and send mail. That's why it isn't used here.
+
+**Setup (once):**
+
+1. **Create a Google Cloud project.** In the [Google Cloud console](https://console.cloud.google.com/), create a project (for example "Coco") and enable the **Gmail API**.
+2. **Configure the OAuth consent screen** (Google Auth Platform):
+   - User type: External.
+   - Add yourself under **Test users**.
+   - Under **Data access**, add the scope `.../auth/gmail.readonly` and nothing else.
+3. **Create an OAuth client.** Go to Clients → Create client → **Desktop app**, then download the JSON file. Save it as `%APPDATA%\coco\google_client_secret.json`. That is outside the repo, and only your Windows account can read it.
+4. **Authorize** by running, from `src/loop`:
+   ```text
+   python gmail_server.py --authorize
+   ```
+   Your browser opens. Sign in, accept the "unverified app" warning (it's your own app), and allow read-only access. This writes `%APPDATA%\coco\gmail_token.json`.
+5. **Enable the server** in `src/loop/mcp_servers.local.json`. See below.
+
+**Re-authorizing every 7 days:** while the consent screen is in **Testing**, Google expires the sign-in after 7 days. When that happens, Coco shows `Server 'gmail' failed to start`, and `logs/mcp-servers.log` says to run `--authorize` again. To stop it expiring, set the app's publishing status to **In production**. A personal app doesn't need Google's verification, but you will keep seeing the "unverified app" warning.
+
+**Revoke:** at Google Account → Security → [Third-party connections](https://myaccount.google.com/connections), remove the app. Then delete `%APPDATA%\coco\gmail_token.json`.
+
+## Enable the services
+
+Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes the keys it names:
+
+```json
+{
+  "servers": {
+    "github": {"enabled": true},
+    "gmail": {"enabled": true}
+  }
+}
+```
+
+Start Coco, either with `coco.bat` or `python agent.py`. The startup lines should show `github: running (8 tools)` and `gmail: running (2 tools)`. Neither server has `log_payloads` set, so their arguments and results are written to `logs/` as `[not logged]`.
 
 ## Troubleshooting
 
@@ -131,6 +193,10 @@ GitHub, Drive, Calendar and Gmail need accounts, consent screens and tokens, so 
 | `Server 'personal' failed to start` | Check `logs/mcp-servers.log`. Usually the `mcp` package is missing (`pip install -r requirements.txt`). |
 | `environment variable X is not set` | Set it in your shell or secret manager before starting Coco. |
 | `does not offer configured tool 'x'` | The server version renamed the tool. Check its tool list and update `tools`. |
+| `Server 'gmail' failed to start` | Look at the end of `logs/mcp-servers.log`. Usually the sign-in is missing or expired: run `python gmail_server.py --authorize`. |
+| `Server 'github' failed to start: ... COCO_GITHUB_TOKEN is not set` | Set the variable (see GitHub setup), then open a new terminal. |
+| `Server 'github' failed to start: ... not found` | `tools\github-mcp-server\github-mcp-server.exe` is missing. Unzip the release there. |
+| GitHub tool returns `Error: ... 401` / `403` | Token expired, revoked, or missing a read permission. Create a new one. |
 | `No current_time tool is available` | The personal server did not start. See the line above. |
 | Model stops calling tools | Run `python evals.py`. The preflight checks that tool schemas reach the model. |
 
