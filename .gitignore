@@ -1,0 +1,13 @@
+# Personal data: never commit
+# (Comments must be on their own line: git treats a trailing "# ..." as part of the pattern.)
+
+# Run logs contain everything typed into the agent
+logs/
+# The agent's notes folder
+notes/
+# Long-term memory: your preferences, facts and decisions
+memory.md
+# The agent's personality
+persona.md
+
+__pycache__/
