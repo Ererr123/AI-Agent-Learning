@@ -1,0 +1,56 @@
+{
+  "_readme": "MCP servers Coco starts. No secrets here: use \"${env:NAME}\" for tokens. Only tools listed under \"tools\" reach the model. Put personal additions in mcp_servers.local.json (git-ignored). See docs/mcp-setup.md.",
+  "servers": {
+    "notes": {
+      "description": "Official MCP filesystem server, limited to the notes folder. Reviewed version, pinned.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2.2.0", "{notes_dir}"],
+      "cwd": "{notes_dir}",
+      "log_payloads": true,
+      "tools": {
+        "list_directory": {
+          "name": "list_notes",
+          "description": "List all the files in the notes folder.",
+          "fixed_args": {"path": "."}
+        },
+        "read_text_file": {
+          "name": "read_file",
+          "description": "Read the contents of a file in the notes folder.",
+          "hide_args": ["head", "tail"],
+          "arg_descriptions": {
+            "path": "Just the file name inside the notes folder, e.g. 'todo.txt'. Do not include 'notes/'."
+          }
+        },
+        "write_file": {
+          "name": "write_file",
+          "description": "Write the contents to a file in the notes folder.",
+          "arg_descriptions": {
+            "path": "Just the file name inside the notes folder, e.g. 'todo.txt'. Do not include 'notes/'.",
+            "content": "The exact literal text to save. Plain text only: no expressions, no string concatenation with +, no placeholders. If you need the current time, call current_time first and paste the result as plain text."
+          }
+        }
+      }
+    },
+    "personal": {
+      "description": "Coco's own memory server (personal_server.py). Only touches the memory file.",
+      "command": "{python}",
+      "args": ["{here}/personal_server.py", "--memory-file", "{memory_file}"],
+      "log_payloads": true,
+      "tools": {
+        "remember": {
+          "arg_descriptions": {
+            "fact": "One short sentence restating what the user told you about themselves.",
+            "category": "Preferences = how the user likes things done. Facts = things about the user. Decisions = choices the user made."
+          }
+        },
+        "forget": {
+          "arg_descriptions": {
+            "text": "A distinctive part of the memory's text, copied from the memory shown in your prompt."
+          }
+        },
+        "list_memories": {},
+        "current_time": {}
+      }
+    }
+  }
+}
