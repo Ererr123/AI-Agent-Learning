@@ -8,14 +8,15 @@ Manual setup:
     llama-server -hf <your-gguf-repo>:Q4_K_M --jinja -c 16384 --port 8080
     python agent.py
 
-Tools come from MCP servers listed in mcp_servers.json (see docs/mcp-setup.md):
-the official filesystem server (notes folder only) and Coco's own personal_server.py (memory).
+Tools come from MCP servers listed in mcp_servers.json (see docs/mcp-setup.md): notes,
+memory and web search always; Gmail, GitHub and coding help loaded per conversation when needed.
 """
 
 import hashlib
 import json
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from openai import OpenAI, APIConnectionError, APIError, APIStatusError, Interna
 import memory_store
 from mcp_host import MCPHost, ConfigError, load_config, load_tool_groups
 
-## Our planned Configuration for the local agent
+## Configuration
 ## 127.0.0.1, not "localhost": on Windows, "localhost" tries IPv6 first, llama-server only listens on
 ## IPv4, and every new connection waited ~2s for the fallback (measured: 2.8s vs 0.75s per call).
 BASE_URL = "http://127.0.0.1:8080/v1"  ## The base URL for the local LLM server
@@ -64,7 +65,7 @@ SYSTEM_PROMPT = (
 )
 
 
-## Memory: a legible markdown file (see memory_store.py), loaded into the system prompt every turn.
+## Memory: a legible markdown file (see memory_store.py), put into the system prompt when a conversation starts.
 ## The model changes it only through the personal MCP server's remember/forget tools.
 def load_memory() -> str:
     return memory_store.load(MEMORY_FILE)
@@ -304,10 +305,10 @@ def asks_to_remember(user_input: str) -> bool:
     return bool(REMEMBER_REQUEST.search(user_input.strip()))
 
 
-def call_model(messages: list[dict], tools: list[dict], on_text=None, tool_choice: str = "auto") -> ModelReply:
+def call_model(messages: list[dict], tools: list[dict], on_text=None) -> ModelReply:
     ## One model call. With on_text, the reply streams: text is passed on as it arrives and
     ## tool calls are assembled from their pieces. Same result either way, so evals can skip streaming.
-    kwargs = dict(model=MODEL, messages=messages, tools=tools, tool_choice=tool_choice,
+    kwargs = dict(model=MODEL, messages=messages, tools=tools, tool_choice="auto",
                   max_tokens=1024,  ## Hard cap on how long any single model response can be
                   temperature=TEMPERATURE)
     if on_text is None:
@@ -400,12 +401,12 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                       latency_ms=round((time.perf_counter() - started) * 1000))
         return record
 
-    emit = None
-    if on_text is not None:
-        def emit(piece: str) -> None:
-            if record["first_text_ms"] is None:
-                record["first_text_ms"] = round((time.perf_counter() - started) * 1000)
-            on_text(piece)
+    def timed(piece: str) -> None:
+        ## Streaming: note when the first words reached the user, then pass the text on
+        if record["first_text_ms"] is None:
+            record["first_text_ms"] = round((time.perf_counter() - started) * 1000)
+        on_text(piece)
+    emit = timed if on_text is not None else None
 
     seen_calls = set()  ## (tool name, raw args) already executed this turn
     tools = tools_for(history)  ## Recomputed every step: load_tools can add tools mid-turn
@@ -458,8 +459,9 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                 record["guard_retries"] += 1
                 continue
             ## If the model did not call a tool, return its response as the final output.
-            history.append({"role": "assistant", "content": reply.content})
-            return finish(reply.content, "answer")
+            ## ("" rather than None for an empty reply: the history must stay valid for the next turn)
+            history.append({"role": "assistant", "content": reply.content or ""})
+            return finish(reply.content or "", "answer")
 
         if reply.content and emit:
             emit("\n")  ## Text streamed before a tool call ("Let me check..."): start the answer on a new line
@@ -503,7 +505,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                 "server": server,       ## Which MCP server handled it (None if the host refused the call)
                 "ok": ok,
                 "repeated": repeated,
-                ## Servers not marked log_payloads (e.g. future Gmail/Drive) never have content logged
+                ## Servers not marked log_payloads (Gmail, GitHub) never have content logged
                 "args": tool_args if log_payloads else "[not logged]",
                 "result": tool_result[:500] if log_payloads else f"[not logged: {len(tool_result)} chars]",
                 "ms": round((time.perf_counter() - t0) * 1000),
@@ -546,10 +548,11 @@ def chat(problems: list[str]):
     if not tools_schema():
         print("\nNo tools are available, so I can't run. See docs/mcp-setup.md (Troubleshooting).")
         return
-    print("Checking the model can use the tools (this also preloads the prompt, so replies start fast)...")
-    problem = check_tools_reach_model()
-    if problem:
-        print(f"\nWARNING: {problem}\n")
+    ## The startup check takes ~10-15s (it also preloads the prompt into the server's cache), so it
+    ## runs in the background while you type. The first message waits for it, keeping the cache warm.
+    startup = {}
+    check = threading.Thread(target=lambda: startup.update(problem=check_tools_reach_model()), daemon=True)
+    check.start()
     print("Type 'quit' to exit, 'clear' to reset the conversation, 'memory' to show what I remember.\n")
 
     while True:
@@ -573,15 +576,28 @@ def chat(problems: list[str]):
             print("Please enter a valid input.\n")
             continue
 
+        if check is not None:
+            if check.is_alive():
+                print("(Finishing the startup check...)")
+            check.join()
+            check = None
+            if startup.get("problem"):
+                print(f"WARNING: {startup['problem']}\n")
+
         printer = ReplyPrinter()
+        turn_start = len(history)
         try:
             response = run_agent(user_input, history, on_text=printer)
             printer.finish(response)
-        except KeyboardInterrupt:
-            print("\n[Interrupted. Type 'quit' to exit.]\n")
-        except Exception as e:
-            printer.finish(None)
-            print(f"Error: {str(e)}\n")
+        except (KeyboardInterrupt, Exception) as e:
+            ## Undo the half-finished turn: a tool call left without its result (or a dangling
+            ## user message) would make every later request in this conversation malformed.
+            del history[turn_start:]
+            if isinstance(e, KeyboardInterrupt):
+                print("\n[Interrupted. Type 'quit' to exit.]\n")
+            else:
+                printer.finish(None)
+                print(f"Error: {str(e)}\n")
 
 
 class ReplyPrinter:

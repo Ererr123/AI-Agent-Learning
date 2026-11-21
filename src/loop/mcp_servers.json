@@ -85,19 +85,56 @@
       "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${env:COCO_GITHUB_TOKEN}"},
       "log_payloads": false,
       "untrusted_content": true,
-      "drop_result_keys": ["id", "node_id", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
+      "drop_result_keys": ["id", "node_id", "full_name", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
                            "forks_count", "open_issues_count", "incomplete_results", "default_branch", "created_at"],
+      "_trimmed": "Schemas cut from ~13,000 to a fraction of that (they load mid-conversation, so every token is re-read): pagination, sorting and field selectors hidden; list sizes and returned fields fixed by the host, which also makes results smaller.",
       "tools": {
-        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login and profile. It does not list repositories: use search_repositories with 'user:<login>' for that."},
+        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login. It does not list repositories: use search_repositories with 'user:<login>' for that."},
         "search_repositories": {
-          "description": "Search GitHub repositories. To list the USER'S OWN repositories, first call github_whoami, then use the query 'user:<their login>'. Without user: this searches all of GitHub."
+          "description": "Search GitHub repositories. For the USER'S OWN repositories, call github_whoami first, then search 'user:<login>'. Without user: this searches all of GitHub.",
+          "fixed_args": {"minimal_output": true, "perPage": 30},
+          "hide_args": ["order", "page", "sort"],
+          "arg_descriptions": {"query": "GitHub search syntax, e.g. 'user:octocat' or 'machine learning language:python'."}
         },
-        "get_file_contents": {},
-        "list_commits": {},
-        "list_issues": {},
-        "issue_read": {},
-        "list_pull_requests": {},
-        "pull_request_read": {}
+        "get_file_contents": {
+          "description": "Read a file, or list a folder, in a GitHub repository.",
+          "fixed_args": {"fields": ["type", "name", "path", "size"]},
+          "hide_args": ["sha"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "path": "File or folder path; '/' for the top folder.",
+                               "ref": "Optional branch or tag, e.g. 'refs/heads/dev'."}
+        },
+        "list_commits": {
+          "description": "List the most recent commits of a GitHub repository (10, newest first).",
+          "fixed_args": {"perPage": 10, "fields": ["sha", "commit"]},
+          "hide_args": ["page", "sha", "author"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "path": "Optional: only commits touching this file.",
+                               "since": "Optional: only commits after this date (YYYY-MM-DD).", "until": "Optional: only commits before this date (YYYY-MM-DD)."}
+        },
+        "list_issues": {
+          "description": "List issues of a GitHub repository (10, open and closed unless state is given).",
+          "fixed_args": {"perPage": 10, "fields": ["number", "title", "state", "labels", "comments", "created_at", "updated_at"]},
+          "hide_args": ["after", "direction", "field_filters", "orderBy", "since"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "state": "Optional: OPEN or CLOSED.",
+                               "labels": "Optional: only issues with these labels."}
+        },
+        "issue_read": {
+          "description": "Read one GitHub issue: its details, comments, sub-issues, parent or labels.",
+          "hide_args": ["page", "perPage"],
+          "arg_descriptions": {"method": "get = details; get_comments; get_sub_issues; get_parent; get_labels.",
+                               "owner": "Repository owner.", "repo": "Repository name.", "issue_number": "The issue number."}
+        },
+        "list_pull_requests": {
+          "description": "List pull requests of a GitHub repository (10).",
+          "fixed_args": {"perPage": 10, "fields": ["number", "title", "state", "draft", "merged", "user", "created_at", "updated_at", "merged_at"]},
+          "hide_args": ["base", "direction", "head", "page", "sort"],
+          "arg_descriptions": {"owner": "Repository owner.", "repo": "Repository name.", "state": "open, closed or all."}
+        },
+        "pull_request_read": {
+          "description": "Read one GitHub pull request: details, diff, changed files, commits, comments, reviews or CI status.",
+          "hide_args": ["after", "page", "perPage"],
+          "arg_descriptions": {"method": "get = details; get_diff; get_files; get_commits; get_comments (general); get_reviews; get_review_comments (code review threads); get_status / get_check_runs (CI).",
+                               "owner": "Repository owner.", "repo": "Repository name.", "pullNumber": "The pull request number."}
+        }
       }
     },
     "gmail": {

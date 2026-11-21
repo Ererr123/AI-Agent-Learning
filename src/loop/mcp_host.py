@@ -24,7 +24,6 @@ import contextlib
 import json
 import os
 import re
-import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,44 +52,36 @@ class ConfigError(Exception):
     """The server configuration is invalid (bad file, missing env var, bad tool settings)."""
 
 
-def load_config(path: Path, local_path: Path | None = None) -> dict[str, dict]:
-    ## Read the checked-in config, then let an optional, git-ignored local file add servers or
-    ## change settings of existing ones by name: {"servers": {"github": {"enabled": true}}}.
+def _merged_section(key: str, path: Path, local_path: Path | None, required: bool) -> dict[str, dict]:
+    ## One section ("servers" or "tool_groups") of the checked-in config, with the optional,
+    ## git-ignored local file adding entries or changing settings of existing ones by name,
+    ## key by key: {"servers": {"github": {"enabled": true}}}.
     def read(p: Path) -> dict:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise ConfigError(f"Could not read MCP config {p}: {e}") from None
-        servers = data.get("servers")
-        if not isinstance(servers, dict):
-            raise ConfigError(f"{p} must contain a \"servers\" object")
-        return servers
+        section = data.get(key, None if required and p == path else {})
+        if not isinstance(section, dict):
+            raise ConfigError(f"{p} must contain a \"{key}\" object")
+        return section
 
-    servers = read(path)
+    merged = read(path)
     if local_path is not None and local_path.exists():
         for name, spec in read(local_path).items():
-            servers[name] = servers.get(name, {}) | spec  ## Local settings win, key by key
-    return servers
+            merged[name] = merged.get(name, {}) | spec  ## Local settings win, key by key
+    return merged
+
+
+def load_config(path: Path, local_path: Path | None = None) -> dict[str, dict]:
+    return _merged_section("servers", path, local_path, required=True)
 
 
 def load_tool_groups(path: Path, local_path: Path | None = None) -> dict[str, dict]:
     ## Optional "tool_groups" next to "servers": servers whose tools reach the model only when a
-    ## conversation needs them (see agent.tools_for). Same local override rule as load_config.
+    ## conversation needs them (see agent.tools_for).
     ## {"email": {"description": "...", "servers": ["gmail"], "keywords": ["email", "inbox"]}}
-    def read(p: Path) -> dict:
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            raise ConfigError(f"Could not read MCP config {p}: {e}") from None
-        groups = data.get("tool_groups", {})
-        if not isinstance(groups, dict):
-            raise ConfigError(f"{p}: \"tool_groups\" must be an object")
-        return groups
-
-    groups = read(path)
-    if local_path is not None and local_path.exists():
-        for name, spec in read(local_path).items():
-            groups[name] = groups.get(name, {}) | spec
+    groups = _merged_section("tool_groups", path, local_path, required=False)
     for name, spec in groups.items():
         if not (isinstance(spec.get("description"), str) and isinstance(spec.get("servers"), list)
                 and isinstance(spec.get("keywords", []), list)):
@@ -210,7 +201,7 @@ class MCPHost:
             self._loop.close()
         self._loop = None
         self.tools = {}
-        if self._errlog is not None and self._errlog is not sys.stderr:
+        if self._errlog is not None:
             self._errlog.close()
             self._errlog = None
 
@@ -419,10 +410,15 @@ class MCPHost:
         for prop in props.values():
             if isinstance(prop, dict):
                 prop.pop("title", None)
+                for key in [k for k in prop if k.startswith("x-")]:
+                    del prop[key]  ## Vendor extensions (e.g. GitHub's x-mcp-header): tokens the model can't use
         required = schema.get("required", [])
 
         fixed = settings.get("fixed_args", {})
         hidden = settings.get("hide_args", [])
+        for arg in [*fixed, *hidden]:
+            if arg not in props:  ## A typo would otherwise be sent to the server on every call
+                raise ConfigError(f"no argument '{arg}' to fix or hide")
         for arg in hidden:
             if arg in required:
                 raise ConfigError(f"cannot hide required argument '{arg}'")

@@ -131,6 +131,12 @@ class Configuration(unittest.TestCase):
             self.assertEqual(names(host), ["add"])
             self.assertTrue(any("cannot hide required" in p for p in host.problems))
 
+    def test_fixing_or_hiding_an_unknown_argument_is_a_config_error(self):
+        with MCPHost({"fake": fake(tools={"echo": {"fixed_args": {"txet": "typo"}},
+                                         "greet": {"hide_args": ["shuot"]}, "add": {}})}) as host:
+            self.assertEqual(names(host), ["add"])
+            self.assertEqual(sum("no argument" in p for p in host.problems), 2)
+
     def test_per_server_result_cap(self):
         with MCPHost({"fake": fake(tools={"big": {}}, max_result_chars=100)}) as host:
             text = host.call("big", '{"size": 5000}').text
