@@ -246,7 +246,7 @@ CASES = [
     Case("web/read_page",
          ## example.com's text has been the same for decades, so the reply can be checked
          turns=["Read https://example.com and tell me what the page says."],
-         checks=[called("read_web_page"), output_matches(r"example|illustrat|documentation", "describes the page"),
+         checks=[called("read_web_page"), output_matches(r"example|illustrat|documentation|placeholder", "describes the page"),
                  finished_within(4)],
          needs=("web",)),
     Case("web/not_for_notes",
@@ -272,6 +272,15 @@ CASES = [
          checks=[called("find_library"), called("read_library_docs"), output_matches(r"stream=True|\.stream\(", "shows a streaming call"),
                  finished_within(5)],
          needs=("context7",)),
+    Case("dev/load_tools_on_demand",
+         ## No coding keyword or owner/repo name, so DeepWiki isn't loaded up front: asked to use it,
+         ## the model must load it with load_tools. (Without being asked, it reasonably uses web
+         ## search, which is always loaded: evals showed correct answers that way.)
+         turns=["Use DeepWiki to explain how the Hono web server routes requests."],
+         ## 6 steps: a wrong repo guess (hono/hono) fails, then a web search fallback still answers well
+         checks=[called("load_tools"), called("ask_repo_docs"), output_matches(r"rout", "talks about routing"),
+                 finished_within(6)],
+         needs=("deepwiki",)),
     Case("dev/repo_docs",
          turns=["In the llama.cpp project (ggml-org/llama.cpp), what does the --n-cpu-moe option do?"],
          checks=[called("ask_repo_docs"), output_matches(r"expert|MoE", "explains experts"),

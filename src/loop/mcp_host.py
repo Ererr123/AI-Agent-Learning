@@ -73,6 +73,32 @@ def load_config(path: Path, local_path: Path | None = None) -> dict[str, dict]:
     return servers
 
 
+def load_tool_groups(path: Path, local_path: Path | None = None) -> dict[str, dict]:
+    ## Optional "tool_groups" next to "servers": servers whose tools reach the model only when a
+    ## conversation needs them (see agent.tools_for). Same local override rule as load_config.
+    ## {"email": {"description": "...", "servers": ["gmail"], "keywords": ["email", "inbox"]}}
+    def read(p: Path) -> dict:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise ConfigError(f"Could not read MCP config {p}: {e}") from None
+        groups = data.get("tool_groups", {})
+        if not isinstance(groups, dict):
+            raise ConfigError(f"{p}: \"tool_groups\" must be an object")
+        return groups
+
+    groups = read(path)
+    if local_path is not None and local_path.exists():
+        for name, spec in read(local_path).items():
+            groups[name] = groups.get(name, {}) | spec
+    for name, spec in groups.items():
+        if not (isinstance(spec.get("description"), str) and isinstance(spec.get("servers"), list)
+                and isinstance(spec.get("keywords", []), list)):
+            raise ConfigError(f"tool group '{name}' needs a \"description\", a \"servers\" list "
+                              "and optionally a \"keywords\" list")
+    return groups
+
+
 def describe(error: BaseException) -> str:
     ## One readable line for an exception, unwrapping anyio/asyncio exception groups.
     while isinstance(error, BaseExceptionGroup) and error.exceptions:
@@ -197,8 +223,16 @@ class MCPHost:
 
     ## ---------- what the model sees ----------
 
-    def tool_schemas(self) -> list[dict]:
-        return [t.schema for t in self.tools.values()]
+    def tool_schemas(self, servers: set | None = None) -> list[dict]:
+        ## All exposed tools, or only those of the given servers (in the same stable order)
+        return [t.schema for t in self.tools.values() if servers is None or t.server in servers]
+
+    def server_of(self, tool_name: str) -> str | None:
+        tool = self.tools.get(tool_name)
+        return tool.server if tool else None
+
+    def running_servers(self) -> set:
+        return {name for name, server in self.servers.items() if server.session is not None}
 
     def status(self) -> dict[str, str]:
         ## Per-server state for display: "running (n tools)" or the failure reason.

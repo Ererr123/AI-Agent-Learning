@@ -35,9 +35,15 @@ class FakeHost:
     def __init__(self):
         self.calls = []
 
-    def tool_schemas(self):
+    def tool_schemas(self, servers=None):
         return [{"type": "function", "function": {"name": n, "description": "", "parameters": {"type": "object"}}}
                 for n in ("remember", "list_notes")]
+
+    def running_servers(self):
+        return {"personal"}
+
+    def server_of(self, name):
+        return "personal"
 
     def call(self, name, args):
         from mcp_host import CallResult
@@ -98,6 +104,79 @@ class RememberGuard(unittest.TestCase):
         self.assertFalse(record["remember_guard"])
         self.assertEqual(shown, ["Hi Palmtree!"])
         self.assertIsNotNone(sent[0][1])
+
+
+class ToolGroups(unittest.TestCase):
+    ## Per-message tool loading: grouped servers reach the model only when the conversation needs them
+    @classmethod
+    def setUpClass(cls):
+        from mcp_host import MCPHost
+        from tests.test_mcp_host import fake
+        cls.saved_host = agent.host
+        cls.host = MCPHost({"core": fake("core", tools={"echo": {}}),
+                            "mail": fake("mail", tools={"add": {}}),
+                            "code": fake("code", tools={"list_dir": {"name": "find_docs"}})})
+        cls.host.start()
+        agent.host = cls.host
+        agent.set_tool_groups({
+            "email": {"description": "the user's mail", "servers": ["mail"], "keywords": ["email", "inbox"]},
+            "coding": {"description": "programming help", "servers": ["code"], "keywords": ["c++", "stack trace"]},
+            "ghost": {"description": "a server that isn't running", "servers": ["missing"], "keywords": ["boo"]},
+        })
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.host.close()
+        agent.host = cls.saved_host
+        agent.tool_groups.clear()
+
+    def names(self, history):
+        return [t["function"]["name"] for t in agent.tools_for(history)]
+
+    def user(self, text):
+        return {"role": "user", "content": text}
+
+    def test_groups_of_stopped_servers_are_dropped(self):
+        self.assertEqual(sorted(agent.tool_groups), ["coding", "email"])
+
+    def test_new_conversation_gets_core_tools_and_load_tools(self):
+        self.assertEqual(self.names([self.user("Hi Coco")]), ["echo", agent.LOAD_TOOLS])
+        load = agent.tools_for([])[-1]["function"]
+        self.assertEqual(load["parameters"]["properties"]["group"]["enum"], ["email", "coding"])
+        self.assertIn("'email': the user's mail", load["description"])
+
+    def test_keywords_load_a_group(self):
+        self.assertEqual(self.names([self.user("Anything new in my INBOX?")]), ["echo", "add", agent.LOAD_TOOLS])
+        self.assertEqual(self.names([self.user("My C++ build fails with a stack trace")]),
+                         ["echo", "find_docs", agent.LOAD_TOOLS])
+
+    def test_keywords_match_whole_words_only(self):
+        self.assertEqual(self.names([self.user("Emailing isn't the same as an emailx")]), ["echo", agent.LOAD_TOOLS])
+
+    def test_groups_stay_loaded_for_the_conversation(self):
+        history = [self.user("check my email"), {"role": "assistant", "content": "Nothing new."},
+                   self.user("thanks! what time is it?")]
+        self.assertIn("add", self.names(history))
+
+    def test_all_groups_loaded_means_no_load_tools(self):
+        history = [self.user("email"), self.user("c++")]
+        self.assertEqual(self.names(history), ["echo", "add", "find_docs"])
+
+    def test_load_tools_call_loads_its_group(self):
+        history = [self.user("Why does my build break?"),
+                   {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function",
+                    "function": {"name": agent.LOAD_TOOLS, "arguments": '{"group": "coding"}'}}]}]
+        self.assertIn("find_docs", self.names(history))
+        text, ok = agent.run_load_tools('{"group": "coding"}')
+        self.assertTrue(ok)
+        self.assertIn("find_docs", text)
+        self.assertFalse(agent.run_load_tools('{"group": "nope"}')[1])
+
+    def test_earlier_tool_calls_keep_their_group(self):
+        ## A tool from a group was called (e.g. after load_tools): its group stays loaded
+        history = [self.user("hello"), {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "1", "type": "function", "function": {"name": "add", "arguments": '{"a": 1, "b": 2}'}}]}]
+        self.assertIn("add", self.names(history))
 
 
 if __name__ == "__main__":

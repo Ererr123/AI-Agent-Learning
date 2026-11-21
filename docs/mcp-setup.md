@@ -101,6 +101,22 @@ Servers are defined in [`src/loop/mcp_servers.json`](../src/loop/mcp_servers.jso
 
 Changing the config or a server version changes the `prompt_version` in logs and evals, because the tool schemas are part of it.
 
+### Per-message tool loading (`tool_groups`)
+
+With every server on, the model gets about 24 tools and gets worse at using them: in evals it made up a file list, and said "let's check" without checking. So some servers are in **tool groups** at the top of `mcp_servers.json`. Their tools reach the model only once a conversation needs them:
+
+| Group | Servers | Loaded when a message contains... |
+|---|---|---|
+| `email` | gmail | email, gmail, inbox, mail, unread, newsletter... |
+| `github` | github | github, repo, repository, commit, pull request, PR... |
+| `coding` | deepwiki, context7, stackoverflow | library, docs, api, error, traceback, code, python, Stack Overflow... or an `owner/repo` name like `ggml-org/llama.cpp` |
+
+- **Always loaded:** servers in no group, which are notes, personal and web. That's 9 tools.
+- **`load_tools`:** while any group is still unloaded, the model also gets this tool. Its description lists each group with its services and tools, so the model can load a group itself when the keywords miss, e.g. "use DeepWiki to...".
+- **Sticky per conversation.** Once loaded, a group stays until `clear`. The tool list sits at the top of the prompt, so every change means re-reading the conversation once, which takes a few seconds; with sticky groups that happens at most once per group. Which groups are active is worked out from the conversation itself, from your messages and the tools already called.
+- **Matching:** keywords match whole words in any case (`email` matches "Email" but not "emailing"). `patterns` are regular expressions. Edit both in `mcp_servers.json`, or override a group in `mcp_servers.local.json`.
+- **What you'll see:** the startup lines list the groups. Each run in `logs/` records `tool_groups`, meaning which groups were loaded.
+
 ### Add a server
 
 1. Review the server's code, authentication and data handling. Record its command, exact version and permissions in its `description`.
@@ -231,6 +247,7 @@ Three optional servers for programming questions. All are free, need no account,
   ```
   Context7 keys come from [context7.com](https://context7.com) and start with `ctx7sk`. Stack Exchange app keys come from [stackapps.com](https://stackapps.com/apps/oauth/register) and aren't secret.
 - **Evals:** `python evals.py --servers web,deepwiki,context7,stackoverflow --repeat 3` runs the whole suite with all of them on, plus the `dev/` and `web/` cases.
+- They're in the `coding` tool group, so turning them on doesn't add any tools until a conversation is about code. See [Per-message tool loading](#per-message-tool-loading-tool_groups).
 
 ## Enable the services
 

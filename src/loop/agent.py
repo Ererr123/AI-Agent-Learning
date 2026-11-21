@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from openai import OpenAI, APIConnectionError, APIError, APIStatusError, InternalServerError
 
 import memory_store
-from mcp_host import MCPHost, ConfigError, load_config
+from mcp_host import MCPHost, ConfigError, load_config, load_tool_groups
 
 ## Our planned Configuration for the local agent
 ## 127.0.0.1, not "localhost": on Windows, "localhost" tries IPv6 first, llama-server only listens on
@@ -116,19 +116,106 @@ def start_tools() -> list[str]:
     }
     try:
         servers = load_config(MCP_CONFIG, MCP_LOCAL_CONFIG)
+        groups = load_tool_groups(MCP_CONFIG, MCP_LOCAL_CONFIG)
     except ConfigError as e:
         return [str(e)]
     host = MCPHost(servers, variables, errlog_path=LOG_DIR / "mcp-servers.log")
-    return host.start()
+    problems = host.start()
+    set_tool_groups(groups)
+    return problems
 
 def stop_tools() -> None:
     global host
     if host is not None:
         host.close()
         host = None
+    tool_groups.clear()
 
 def tools_schema() -> list[dict]:
+    ## Every tool the running servers expose (for prompt_version and the startup listing).
+    ## What the model actually gets on each call is tools_for(history).
     return host.tool_schemas() if host else []
+
+
+## ---------- Per-message tool loading ----------
+## With every server on, the model gets ~24 tools and gets worse at using them (evals: a made-up
+## file list, "let's check" without checking). So servers in a "tool group" (mcp_servers.json)
+## only reach the model once the conversation needs them: a group loads when a user message
+## contains one of its keywords, or when the model calls load_tools. Groups are STICKY for the
+## conversation: the tool list sits at the top of the prompt, so every change costs a re-read of
+## the conversation; with sticky groups that happens at most once per group. Which groups are
+## active is worked out from the history itself, so there's no extra state to keep in sync.
+LOAD_TOOLS = "load_tools"
+tool_groups: dict[str, dict] = {}   ## name -> {"description", "servers", "pattern"} (running servers only)
+
+def set_tool_groups(groups: dict[str, dict]) -> None:
+    tool_groups.clear()
+    running = host.running_servers() if host else set()
+    for name, spec in groups.items():
+        servers = [s for s in spec["servers"] if s in running]
+        if not servers:
+            continue  ## None of its servers is on: nothing to load
+        ## Keywords match as whole words, any case; "patterns" are extra regular expressions
+        alternatives = ([r"(?<!\w)(?:" + "|".join(re.escape(k) for k in spec["keywords"]) + r")(?!\w)"]
+                        if spec.get("keywords") else []) + list(spec.get("patterns", []))
+        pattern = re.compile("|".join(alternatives), re.IGNORECASE) if alternatives else None
+        tool_groups[name] = {"description": spec["description"], "servers": servers, "pattern": pattern}
+
+def active_groups(history: list[dict]) -> set:
+    active = set()
+    group_of_server = {s: g for g, spec in tool_groups.items() for s in spec["servers"]}
+    for message in history:
+        if message.get("role") == "user":
+            for name, spec in tool_groups.items():
+                if spec["pattern"] and spec["pattern"].search(message.get("content") or ""):
+                    active.add(name)
+        for call in message.get("tool_calls") or []:
+            name = call["function"]["name"]
+            if name == LOAD_TOOLS:
+                try:
+                    active.add(json.loads(call["function"]["arguments"] or "{}").get("group"))
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            elif host and host.server_of(name) in group_of_server:
+                active.add(group_of_server[host.server_of(name)])
+    return active & set(tool_groups)
+
+def tools_for(history: list[dict]) -> list[dict]:
+    ## The tools for the next model call: ungrouped servers always, plus the active groups,
+    ## plus load_tools while some groups are still unloaded. Stable order, so the prefix caches.
+    if host is None:
+        return []
+    active = active_groups(history)
+    grouped = {s for spec in tool_groups.values() for s in spec["servers"]}
+    allowed = (host.running_servers() - grouped) | {s for g in active for s in tool_groups[g]["servers"]}
+    schemas = host.tool_schemas(servers=allowed)
+    inactive = [g for g in tool_groups if g not in active]
+    if inactive:
+        ## Name the services and tools too: asked to "use DeepWiki", the model said it had no access
+        ## until the description said which group DeepWiki was in
+        def offer(g):
+            spec = tool_groups[g]
+            names = [t["function"]["name"] for t in host.tool_schemas(servers=set(spec["servers"]))]
+            return f"'{g}': {spec['description']} (services: {', '.join(spec['servers'])}; tools: {', '.join(names)})"
+        schemas.append({"type": "function", "function": {
+            "name": LOAD_TOOLS,
+            "description": ("Load more tools when the user's request needs something you have no tool for. "
+                            "Available: " + "; ".join(offer(g) for g in inactive)
+                            + ". After loading, use the new tools in your next step."),
+            "parameters": {"type": "object", "properties": {
+                "group": {"type": "string", "enum": inactive, "description": "Which tools to load."}},
+                "required": ["group"]}}})
+    return schemas
+
+def run_load_tools(raw_args: str) -> tuple[str, bool]:
+    try:
+        group = json.loads(raw_args or "{}").get("group")
+    except (json.JSONDecodeError, AttributeError):
+        group = None
+    if group not in tool_groups:
+        return f"Error: unknown tool group {group!r}. Available: {', '.join(tool_groups) or 'none'}.", False
+    names = [t["function"]["name"] for t in host.tool_schemas(servers=set(tool_groups[group]["servers"]))]
+    return f"Loaded the {group} tools: {', '.join(names)}. Use them now.", True
 
 ## Observability: every run produces a trace record, appended to logs/YYYY-MM-DD.jsonl
 def prompt_version() -> str:
@@ -142,13 +229,14 @@ def check_tools_reach_model() -> str | None:
     ## Some GGUF chat templates silently drop the tools, so the model can't call them and starts
     ## inventing answers. Detect it: a prompt with tools must be much longer than one without.
     ## Returns None if fine, otherwise a description of the problem.
-    tools = tools_schema()
-    if not any(t["function"]["name"] == "current_time" for t in tools):
-        return "No current_time tool is available (is the 'personal' MCP server running?)."
-    ## The real system prompt, with tools sent last: the server keeps this prefix cached, so the
-    ## first real turn only reads the user's message instead of ~1.5-5k tokens of prompt + tools.
+    ## The real system prompt and the same starting tools as a new conversation, with tools sent
+    ## last: the server keeps this prefix cached, so the first real turn only reads the user's
+    ## message instead of ~1.5-5k tokens of prompt + tools.
     msgs = [{"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": "What time is it? Use the current_time tool."}]
+    tools = tools_for(msgs)
+    if not any(t["function"]["name"] == "current_time" for t in tools):
+        return "No current_time tool is available (is the 'personal' MCP server running?)."
     try:
         bare = client.chat.completions.create(model=MODEL, messages=msgs, max_tokens=1, temperature=0)
         with_tools = client.chat.completions.create(model=MODEL, messages=msgs, tools=tools,
@@ -298,6 +386,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
         "cached_tokens": 0,     ## Prompt tokens the server reused from its cache instead of re-reading
         "llm_calls": [],        ## Per model call: [{step, prompt_n, cache_n, prompt_ms, gen_n, gen_ms}]
         "first_text_ms": None,  ## Streaming only: when the user saw the first words (None if not streamed)
+        "tool_groups": [],          ## Optional tool groups loaded in this conversation (after this turn)
         "remember_guard": False,    ## The user said "remember ...": a reply without remember is retried
         "guard_retries": 0,         ## Replies thrown away because they claimed to save without saving
         "steps": 0,
@@ -307,7 +396,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
     }
 
     def finish(output: str, reason: str) -> dict:
-        record.update(output=output, stop_reason=reason,
+        record.update(output=output, stop_reason=reason, tool_groups=sorted(active_groups(history)),
                       latency_ms=round((time.perf_counter() - started) * 1000))
         return record
 
@@ -319,7 +408,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
             on_text(piece)
 
     seen_calls = set()  ## (tool name, raw args) already executed this turn
-    tools = tools_schema()
+    tools = tools_for(history)  ## Recomputed every step: load_tools can add tools mid-turn
     if not tools:
         raise RuntimeError("No tools are available: call start_tools() first and check its problems.")
     ## Guard: evals showed the model replying "Got it, I'll remember" (even "(remembered) ✅") WITHOUT
@@ -332,6 +421,7 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
     saved = False
     for step in range(MAX_STEPS):
         record["steps"] = step + 1
+        tools = tools_for(history)
         holding = guard and not saved
         nudge = ([{"role": "user", "content": "(Note from the app, not the user: nothing has been saved yet. "
                    "Call the remember tool now with what the user asked you to remember.)"}]
@@ -400,8 +490,11 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                                "Do not call it again. Answer the user now.")
             else:
                 seen_calls.add(call_key)
-                result = host.call(tool_name, tool_args)  ## Routed to the MCP server that offers it
-                tool_result, server, ok, log_payloads = result.text, result.server, result.ok, result.log_payloads
+                if tool_name == LOAD_TOOLS:  ## Handled here: it only changes tools_for() from the next step
+                    (tool_result, ok), server, log_payloads = run_load_tools(tool_args), "agent", True
+                else:
+                    result = host.call(tool_name, tool_args)  ## Routed to the MCP server that offers it
+                    tool_result, server, ok, log_payloads = result.text, result.server, result.ok, result.log_payloads
             if tool_name == "remember":
                 saved = True  ## Tried (a failure is reported honestly by the model): the guard is done
             record["tool_calls"].append({
@@ -444,7 +537,10 @@ def chat(problems: list[str]):
     print(f"Model:       {server_model()}")
     for name, state in (host.status().items() if host else []):
         print(f"MCP server:  {name}: {state}")
-    print(f"Tools:       {', '.join(t['function']['name'] for t in tools_schema()) or '(none)'}")
+    print(f"Tools:       {', '.join(t['function']['name'] for t in tools_for([])) or '(none)'}")
+    for name, spec in tool_groups.items():
+        loaded_on = "load_tools" + (" or keywords" if spec["pattern"] else "")
+        print(f"Tool group:  {name} ({', '.join(spec['servers'])}): loaded when needed ({loaded_on})")
     for problem in problems:
         print(f"WARNING: {problem}")
     if not tools_schema():
