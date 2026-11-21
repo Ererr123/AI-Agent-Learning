@@ -11,12 +11,12 @@
       "tools": {
         "list_directory": {
           "name": "list_notes",
-          "description": "List all the files in the notes folder.",
+          "description": "List all the files in the notes folder. Call this first whenever the user names a note by topic (e.g. 'my shopping list') instead of its exact file name.",
           "fixed_args": {"path": "."}
         },
         "read_text_file": {
           "name": "read_file",
-          "description": "Read the contents of a file in the notes folder.",
+          "description": "Read the contents of a file in the notes folder. Needs the exact file name: never guess one. If the user didn't give it, call list_notes first and read the file that matches.",
           "hide_args": ["head", "tail"],
           "arg_descriptions": {
             "path": "Just the file name inside the notes folder, e.g. 'todo.txt'. Do not include 'notes/'."
