@@ -111,6 +111,24 @@ Expected: the 2–3 minute turns go away. Tool turns settle at roughly 10–25 s
       non-streaming path.
 
 ### Step 4: Trial a model that fits in VRAM (biggest raw speedup, must earn it)
+
+**Result (2026-11-20): rejected. Coco stays on Qwen3-30B-A3B.** Qwen3.5-9B Q4_K_M, fully on the GPU,
+same flags (`-np 1 -fa off`), evals at 3 repeats and temperature 0.9:
+
+| | 30B-A3B | 9B, thinking off | 9B, thinking on |
+|---|---|---|---|
+| Eval score | **20/20** | 17.7/20 | 19/20 |
+| Avg eval turn | 4.1 s | 1.7 s | 4.5 s |
+| 7-turn speed bench | 56.5 s | 29.9 s | — |
+| Reading / writing at 6.5k depth | 160 / 14 t/s | 454 / 48 t/s | same |
+
+- Thinking off: it said "saved" without calling `remember` and invented the time instead of
+  calling `current_time`, even when told to use the tool (it failed the startup check).
+- Thinking on fixes the tool calls, but it writes ~4× more tokens per turn, so it's no faster than
+  the 30B. It also **made up the entire contents of a notes file** without reading it (2/3 runs
+  of `persona/does_the_work`) and once gave an empty reply.
+- Rule: no quality regression. Revisit when a stronger small model comes out. The eval suite plus
+  `speed_bench.py` make that a ~15 minute check.
 - [ ] Add a model switch to coco.bat (`MODEL` already exists; document the alternatives).
 - [ ] Candidate: **Qwen3.5-9B Q4_K_M** (5.7 GB, all layers on the GPU). Use the official GGUF via `-hf`
       instead of the copy in the openwhispr cache.
