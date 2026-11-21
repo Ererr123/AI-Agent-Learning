@@ -1,7 +1,8 @@
 @echo off
 rem ============================================================================
 rem  Double-click to start Coco.
-rem    1. Checks Python, Node.js (for the notes MCP server) and the Python packages
+rem    1. Checks Python, Node.js (for the notes MCP server) and the Python packages,
+rem       and starts the SearXNG container for web search if Docker Desktop is running
 rem    2. Starts llama-server in its own minimized window (unless it's already running)
 rem    3. Waits for the model to load, then runs Coco in this window
 rem    4. When you quit Coco, stops the llama-server it started (frees GPU memory)
@@ -35,6 +36,16 @@ if errorlevel 1 (
     echo Installing Python requirements...
     python -m pip install -r src\loop\requirements.txt || goto :fail
 )
+
+rem ---- 1b. Web search (optional): the coco-searxng Docker container, see docs\mcp-setup.md ----
+where docker >nul 2>nul
+if errorlevel 1 goto :web_done
+docker info >nul 2>nul
+if errorlevel 1 (echo Web search: off - start Docker Desktop to use it. & goto :web_done)
+docker start coco-searxng >nul 2>nul
+if errorlevel 1 (echo Web search: off - the coco-searxng container isn't set up, see docs\mcp-setup.md. & goto :web_done)
+echo Web search: on ^(SearXNG at http://127.0.0.1:8888^)
+:web_done
 
 rem ---- 2. llama-server ----
 set "LLAMA_PID="

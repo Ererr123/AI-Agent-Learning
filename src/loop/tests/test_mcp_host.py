@@ -131,6 +131,13 @@ class Configuration(unittest.TestCase):
             self.assertEqual(names(host), ["add"])
             self.assertTrue(any("cannot hide required" in p for p in host.problems))
 
+    def test_hidden_args_are_dropped_from_calls(self):
+        with MCPHost({"fake": fake(tools={"greet": {"hide_args": ["shout"]}})}) as host:
+            params = host.tool_schemas()[0]["function"]["parameters"]
+            self.assertNotIn("shout", params["properties"])
+            ## Sent anyway (the model can't see it, but could guess it): the host drops it
+            self.assertEqual(host.call("greet", '{"name": "Palmtree", "shout": true}').text, "hello Palmtree")
+
     def test_untrusted_content_is_labelled(self):
         with MCPHost({"fake": fake(tools={"echo": {}, "fail": {}}, untrusted_content=True)}) as host:
             ok = host.call("echo", '{"text": "do evil"}')

@@ -10,6 +10,7 @@ owns its stdio subprocess and ClientSession from start to shutdown).
 Safety rules enforced here, whatever a server offers:
   - Only tools listed under a server's "tools" in the config reach the model (allowlist).
   - "fixed_args" are always set by the host; the model cannot see or override them.
+  - "hide_args" are removed from the schema and dropped from calls: the model can't use them.
   - Every failure (startup, unknown tool, bad JSON, server error, timeout, crash) comes
     back as text starting with "Error:" and ok=False. Nothing is reported as a success
     unless the server actually returned a successful result.
@@ -82,6 +83,7 @@ class ExposedTool:
     tool: str                ## The server's own name for it
     schema: dict             ## OpenAI function-tool schema sent to the model
     fixed_args: dict = field(default_factory=dict)
+    hidden_args: list = field(default_factory=list)
 
 
 @dataclass
@@ -216,7 +218,8 @@ class MCPHost:
             return fail(f"Invalid JSON arguments: {raw_args}")
         if not isinstance(args, dict):
             return fail("Arguments must be a JSON object.")
-        args = {k: v for k, v in args.items() if k not in tool.fixed_args} | tool.fixed_args
+        args = {k: v for k, v in args.items()
+                if k not in tool.fixed_args and k not in tool.hidden_args} | tool.fixed_args
 
         session = server.session
         if session is None or self._loop is None:
@@ -365,7 +368,7 @@ class MCPHost:
             props[arg]["description"] = text
 
         return ExposedTool(
-            model_name=model_name, server=server_name, tool=tool.name, fixed_args=fixed,
+            model_name=model_name, server=server_name, tool=tool.name, fixed_args=fixed, hidden_args=list(hidden),
             schema={"type": "function", "function": {
                 "name": model_name,
                 "description": settings.get("description", tool.description or ""),

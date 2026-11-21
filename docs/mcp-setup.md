@@ -11,6 +11,7 @@ mcp_host.py  (MCP client: starts servers, discovers tools, allowlist, routing, e
    |  MCP over stdio, one subprocess per server
    +-- notes:    @modelcontextprotocol/server-filesystem@2.2.0, limited to notes/
    +-- personal: personal_server.py, limited to memory.md
+   +-- (optional, off by default) github, gmail, web: see their sections below
 ```
 
 | Model-facing tool | Server | Server's own tool |
@@ -174,6 +175,38 @@ Google's own Gmail MCP server is a hosted preview, and it also requires the `gma
 
 **Revoke:** at Google Account → Security → [Third-party connections](https://myaccount.google.com/connections), remove the app. Then delete `%APPDATA%\coco\gmail_token.json`.
 
+## Web search (free, no account)
+
+**Server:** [`mcp-searxng@2.10.0`](https://github.com/ihor-sokoliuk/mcp-searxng), talking to your own [SearXNG](https://docs.searxng.org/) in Docker. SearXNG is a meta-search engine: it sends each query to DuckDuckGo, Google, Bing and others, then merges the results. It's free and needs no key. Two tools:
+
+| Model-facing tool | Server's own tool | What the model can set |
+|---|---|---|
+| `web_search` | `searxng_web_search` | `query`, `time_range`. Fixed: 6 results, compact text. |
+| `read_web_page` | `web_url_read` | `url`. Fixed: at most 8,000 characters. |
+
+Search results and pages are labeled as untrusted, like emails, because web pages are the easiest place to plant prompt injection. `read_web_page` refuses private and internal addresses (`localhost`, `192.168.x.x`, ...) by default, so a page can't steer Coco into your local network. Rule 10 in the system prompt makes Coco open the official page for "latest/current" questions, because snippets are often months old. Those questions take ~25 s instead of ~6 s.
+
+**Setup (once):**
+
+1. Install and start [Docker Desktop](https://www.docker.com/products/docker-desktop/), which is free for personal use.
+2. Create the container. It listens only on this PC (`127.0.0.1`), and its config lives in `%APPDATA%\coco\searxng`, outside the repo:
+   ```text
+   docker run -d --name coco-searxng -p 127.0.0.1:8888:8080 -v "%APPDATA%\coco\searxng:/etc/searxng" searxng/searxng:2026.11.20-cd6d28091
+   ```
+3. Turn on JSON output, which mcp-searxng needs. Add this to the end of `%APPDATA%\coco\searxng\settings.yml`, then run `docker restart coco-searxng`:
+   ```yaml
+   search:
+     formats:
+       - html
+       - json
+   ```
+4. Check it: <http://127.0.0.1:8888/search?q=test&format=json> should return JSON.
+5. Enable the `web` server in `mcp_servers.local.json`. See below.
+
+`coco.bat` starts the container if Docker Desktop is running. If Docker isn't running, it prints `Web search: off`, and Coco says so if you ask her to search.
+
+**Limits:** your queries go to the search engines from your IP address, but not to any account. If an engine rate-limits or shows a CAPTCHA, SearXNG pauses that engine for a while and uses the others. Results can be thinner then, but for one person's use it rarely happens.
+
 ## Enable the services
 
 Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes the keys it names:
@@ -182,12 +215,15 @@ Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes
 {
   "servers": {
     "github": {"enabled": true},
-    "gmail": {"enabled": true}
+    "gmail": {"enabled": true},
+    "web": {"enabled": true}
   }
 }
 ```
 
-Start Coco, either with `coco.bat` or `python agent.py`. The startup lines should show `github: running (8 tools)` and `gmail: running (2 tools)`. Neither server has `log_payloads` set, so their arguments and results are written to `logs/` as `[not logged]`.
+Start Coco, either with `coco.bat` or `python agent.py`. The startup lines should show `github: running (8 tools)`, `gmail: running (2 tools)` and `web: running (2 tools)`. GitHub and Gmail don't have `log_payloads` set, so their arguments and results are written to `logs/` as `[not logged]`. Web searches and pages are logged, which is useful for debugging.
+
+To check web search with the evals (Gmail and GitHub are never used): `python evals.py --web --repeat 3`. This turns on the web server for every case and adds the `web/` cases.
 
 ## Troubleshooting
 
@@ -197,6 +233,8 @@ Start Coco, either with `coco.bat` or `python agent.py`. The startup lines shoul
 | `did not start within 60s` | First npx download is slow or offline. Run `npx -y @modelcontextprotocol/server-filesystem@2.2.0 .` once by hand. |
 | `Server 'personal' failed to start` | Check `logs/mcp-servers.log`. Usually the `mcp` package is missing (`pip install -r requirements.txt`). |
 | `environment variable X is not set` | Set it in your shell or secret manager before starting Coco. |
+| Web search errors such as `fetch failed` or `ECONNREFUSED 127.0.0.1:8888` | SearXNG isn't running. Start Docker Desktop, then run `docker start coco-searxng`, or restart Coco through `coco.bat`. |
+| Web search returns `403` or HTML instead of results | JSON output isn't enabled. Do step 3 of the web search setup. |
 | `does not offer configured tool 'x'` | The server version renamed the tool. Check its tool list and update `tools`. |
 | `Server 'gmail' failed to start` | Look at the end of `logs/mcp-servers.log`. Usually the sign-in is missing or expired: run `python gmail_server.py --authorize`. |
 | `Server 'github' failed to start: ... COCO_GITHUB_TOKEN is not set` | Set the variable (see GitHub setup), then open a new terminal. |

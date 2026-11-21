@@ -27,6 +27,11 @@ def add(a: int, b: int) -> str:
     return str(a + b)
 
 
+@server.tool(description="Greet someone, optionally loudly.")
+def greet(name: str, shout: bool = False) -> str:
+    return f"HELLO {name.upper()}" if shout else f"hello {name}"
+
+
 @server.tool(description="List files in a folder.")
 def list_dir(path: str) -> str:
     return f"listing of {path}"

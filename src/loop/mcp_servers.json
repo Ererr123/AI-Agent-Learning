@@ -39,6 +39,7 @@
       "log_payloads": true,
       "tools": {
         "remember": {
+          "description": "Save a lasting preference, fact, or decision about the user to long-term memory. Call this EVERY time the user says 'remember' or tells you something lasting about themselves. This tool is the only way anything gets saved: replying 'got it' or 'I'll remember' without calling it saves nothing.",
           "arg_descriptions": {
             "fact": "One short sentence restating what the user told you about themselves.",
             "category": "Preferences = how the user likes things done. Facts = things about the user. Decisions = choices the user made."
@@ -87,6 +88,34 @@
       "tools": {
         "search_emails": {},
         "read_email": {}
+      }
+    },
+    "web": {
+      "description": "Web search through a local SearXNG (Docker container coco-searxng on 127.0.0.1:8888, see docs/mcp-setup.md) via the mcp-searxng server. Free, no account or key. Pages are untrusted (prompt injection) and capped in size. web_url_read refuses private/internal addresses by default. Off by default: enable in mcp_servers.local.json once SearXNG is set up.",
+      "enabled": false,
+      "command": "npx",
+      "args": ["-y", "mcp-searxng@2.10.0"],
+      "env": {"SEARXNG_URL": "http://127.0.0.1:8888"},
+      "log_payloads": true,
+      "untrusted_content": true,
+      "tools": {
+        "searxng_web_search": {
+          "name": "web_search",
+          "description": "Search the web for current or general information that isn't in your memory or the user's notes/email: news, facts, prices, how-tos, docs. Returns titles, URLs and short snippets. Snippets are often enough to answer; read a page with read_web_page when they aren't. Snippets can be months old: for 'latest', 'current' or 'newest' questions, read the most official result (e.g. the project's own site) before answering.",
+          "fixed_args": {"num_results": 6, "result_detail": "compact", "response_format": "text"},
+          "hide_args": ["pageno", "pages", "language", "safesearch", "min_score", "categories", "engines"],
+          "arg_descriptions": {
+            "query": "Plain search keywords, like you'd type into a search engine.",
+            "time_range": "Only for recent news: 'day', 'week', 'month' or 'year'. Leave out otherwise."
+          }
+        },
+        "web_url_read": {
+          "name": "read_web_page",
+          "description": "Open a web page (a search result, or a link the user gave) and return its text. Long pages are cut off.",
+          "fixed_args": {"maxLength": 8000},
+          "hide_args": ["startChar", "section", "paragraphRange", "readHeadings"],
+          "arg_descriptions": {"url": "The full http(s) URL of the page."}
+        }
       }
     }
   }
