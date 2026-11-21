@@ -104,11 +104,17 @@ Takeaways:
 Expected: the 2–3 minute turns go away. Tool turns settle at roughly 10–25 s.
 
 ### Step 3: Feel faster (stream the reply)
-- [ ] Stream responses (`stream=True`) and print reply text as it arrives. Tool calls are
+- [x] Stream responses (`stream=True`) and print reply text as it arrives. Tool calls are
       accumulated from the deltas exactly as now. Total time stays the same, but the first words
       show up in ~1 s instead of after the whole reply (10–30 s for long ones).
-- [ ] Keep the trace record identical, so evals and logs don't change. Evals can keep the
-      non-streaming path.
+- [x] Keep the trace record identical, so evals and logs don't change. Evals can keep the
+      non-streaming path. (The trace gains one field, `first_text_ms`.)
+- [x] (Found while measuring) `BASE_URL` uses `127.0.0.1`, not `localhost`. On Windows `localhost`
+      tries IPv6 first, llama-server only listens on IPv4, and every new connection waited ~2 s
+      for the fallback (2.8 s vs 0.75 s for the same short call).
+
+Result: 7-turn bench 56.5 s → 47.8 s total. Short replies start in 0.3 s. Tool turns show their
+first words 3–6 s before they finish.
 
 ### Step 4: Trial a model that fits in VRAM (biggest raw speedup, must earn it)
 

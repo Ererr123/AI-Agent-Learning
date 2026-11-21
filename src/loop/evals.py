@@ -229,7 +229,9 @@ CASES = [
 
 def run_case(case: Case) -> dict:
     ## Run one case in a fresh sandbox and grade it.
-    with tempfile.TemporaryDirectory() as tmp:
+    ## ignore_cleanup_errors: on Windows the filesystem server (node) can still hold notes/ open for a
+    ## moment after it's stopped; a leftover temp folder must not crash the whole run.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         agent.NOTES_DIR = root / "notes"
         agent.MEMORY_FILE = root / "memory.md"
@@ -313,7 +315,7 @@ def main():
     ## prompt version (which includes the discovered tool schemas).
     ## A broken setup (tools never reaching the model) would otherwise show up as a wall of
     ## "regressions" and get blamed on the prompt or model. Stop before wasting a run on it.
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         agent.NOTES_DIR, agent.MEMORY_FILE = Path(tmp) / "notes", Path(tmp) / "memory.md"
         try:
             problems = agent.start_tools()

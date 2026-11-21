@@ -50,6 +50,8 @@ def summarize(trace: dict) -> dict:
     calls = trace["llm_calls"]
     return {
         "wall_s": round(trace["latency_ms"] / 1000, 1),
+        ## When the first words appeared (streaming, like the real chat). None if nothing streamed.
+        "first_text_s": round(trace["first_text_ms"] / 1000, 1) if trace.get("first_text_ms") is not None else None,
         "steps": trace["steps"],
         "read_tokens": sum(c["prompt_n"] for c in calls),     ## Actually read by the server
         "cached_tokens": sum(c["cache_n"] for c in calls),    ## Reused from the cache
@@ -94,7 +96,7 @@ def main():
         sys.exit(f"Can't reach the model server at {agent.BASE_URL}: {e}")
 
     rows, startup_s, prompt_version = [], None, None
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)
         agent.NOTES_DIR, agent.MEMORY_FILE = root / "notes", root / "memory.md"
         agent.NOTES_DIR.mkdir()
@@ -116,16 +118,17 @@ def main():
             prompt_version = agent.prompt_version()  ## Needs the running tools, so take it now
             print(f"Model: {model} | prompt {prompt_version} | temperature {agent.TEMPERATURE}")
             print(f"Startup check: {startup_s}s\n")
-            print(f"{'turn':16} {'wall':>6} {'steps':>5} {'read':>6} {'cached':>7} {'prompt':>7} {'gen':>12}  tools")
+            print(f"{'turn':16} {'wall':>6} {'first':>6} {'steps':>5} {'read':>6} {'cached':>7} {'prompt':>7} {'gen':>12}  tools")
             for label, turn, private in turns:
-                trace = agent.run_agent_traced(turn, history)
+                trace = agent.run_agent_traced(turn, history, on_text=lambda piece: None)  ## Stream, like chat
                 row = {"label": label, **summarize(trace)}
                 if not private:
                     row["reply"] = (trace["output"] or "")[:200]
                 rows.append(row)
                 gen_rate = f"{row['gen_tokens'] / row['gen_s']:.0f}t/s" if row["gen_s"] else "-"
                 miss = "  CACHE MISS" if row["misses"] else ""
-                print(f"{label:16} {row['wall_s']:5.1f}s {row['steps']:5} {row['read_tokens']:6} "
+                first = f"{row['first_text_s']:5.1f}s" if row["first_text_s"] is not None else "     -"
+                print(f"{label:16} {row['wall_s']:5.1f}s {first} {row['steps']:5} {row['read_tokens']:6} "
                       f"{row['cached_tokens']:7} {row['prompt_s']:6.1f}s {row['gen_s']:5.1f}s {gen_rate:>6}  "
                       f"{', '.join(row['tools']) or '-'}{miss}")
         finally:

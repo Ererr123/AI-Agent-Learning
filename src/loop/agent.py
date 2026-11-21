@@ -18,13 +18,16 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from openai import OpenAI, InternalServerError
+from dataclasses import dataclass, field
+from openai import OpenAI, APIConnectionError, APIError, APIStatusError, InternalServerError
 
 import memory_store
 from mcp_host import MCPHost, ConfigError, load_config
 
 ## Our planned Configuration for the local agent
-BASE_URL = "http://localhost:8080/v1"  ## The base URL for the local LLM server
+## 127.0.0.1, not "localhost": on Windows, "localhost" tries IPv6 first, llama-server only listens on
+## IPv4, and every new connection waited ~2s for the fallback (measured: 2.8s vs 0.75s per call).
+BASE_URL = "http://127.0.0.1:8080/v1"  ## The base URL for the local LLM server
 MODEL = "Coco"     ## The model name to use for the local LLM server
 NOTES_DIR = Path("notes") ## the only folder the agent can read/write to
 MEMORY_FILE = Path("memory.md") ## Long-term memory: a plain markdown file you can open and edit any time
@@ -179,14 +182,83 @@ def write_log(record: dict) -> None:
     except Exception as e:
         print(f"[warning: could not write log: {e}]")
 
-def run_agent(user_input: str, history: list[dict]) -> str:
+def run_agent(user_input: str, history: list[dict], on_text=None) -> str:
     ## Run one user turn and return the agent's reply. The full trace is logged.
-    record = run_agent_traced(user_input, history)
+    ## on_text(piece) receives the reply as it's written (streaming); None waits for the whole reply.
+    record = run_agent_traced(user_input, history, on_text)
     write_log(record)
     return record["output"]
 
+
+@dataclass
+class ModelReply:
+    content: str | None
+    tool_calls: list[dict]      ## [{"id", "name", "arguments"}], arguments as the raw JSON string
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    timings: dict = field(default_factory=dict)  ## llama-server extra: where the time went
+
+
+class InvalidToolCall(Exception):
+    ## The server couldn't parse the tool call the model wrote
+    pass
+
+
+def call_model(messages: list[dict], tools: list[dict], on_text=None) -> ModelReply:
+    ## One model call. With on_text, the reply streams: text is passed on as it arrives and
+    ## tool calls are assembled from their pieces. Same result either way, so evals can skip streaming.
+    kwargs = dict(model=MODEL, messages=messages, tools=tools, tool_choice="auto",
+                  max_tokens=1024,  ## Hard cap on how long any single model response can be
+                  temperature=TEMPERATURE)
+    if on_text is None:
+        try:
+            r = client.chat.completions.create(**kwargs)
+        except InternalServerError as e:
+            raise InvalidToolCall(str(e)) from e
+        m = r.choices[0].message
+        return ModelReply(
+            content=m.content,
+            tool_calls=[{"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
+                        for tc in m.tool_calls or []],
+            prompt_tokens=(r.usage.prompt_tokens or 0) if r.usage else 0,
+            completion_tokens=(r.usage.completion_tokens or 0) if r.usage else 0,
+            timings=(r.model_extra or {}).get("timings") or {})
+
+    reply, text, calls = ModelReply(content=None, tool_calls=[]), [], {}
+    try:
+        stream = client.chat.completions.create(**kwargs, stream=True, stream_options={"include_usage": True})
+        for chunk in stream:
+            extra = chunk.model_extra or {}
+            if extra.get("timings"):
+                reply.timings = extra["timings"]
+            if chunk.usage:
+                reply.prompt_tokens = chunk.usage.prompt_tokens or 0
+                reply.completion_tokens = chunk.usage.completion_tokens or 0
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                text.append(delta.content)
+                on_text(delta.content)
+            for tc in delta.tool_calls or []:
+                slot = calls.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                slot["id"] = tc.id or slot["id"]
+                if tc.function:
+                    slot["name"] += tc.function.name or ""
+                    slot["arguments"] += tc.function.arguments or ""
+    except InternalServerError as e:
+        raise InvalidToolCall(str(e)) from e
+    except (APIStatusError, APIConnectionError):
+        raise  ## A real HTTP/connection problem (context too long, server down, timeout)
+    except APIError as e:
+        ## An error event inside an already-started stream: the server failed to parse the tool call
+        raise InvalidToolCall(str(e)) from e
+    reply.content = "".join(text) if text else None
+    reply.tool_calls = [{**c, "id": c["id"] or f"call_{i}"} for i, c in sorted(calls.items())]
+    return reply
+
 ## One user turn: call the model, run the tools it asks for, repeat until it answers.
-def run_agent_traced(user_input: str, history: list[dict]) -> dict:
+def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict:
     ## history is the whole conversation. Its first message is the system prompt, built once when
     ## the conversation starts and then frozen: llama-server reuses its cache only for an unchanged
     ## prefix, so rebuilding it after every remember/forget made it re-read the entire conversation
@@ -213,6 +285,7 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
         "gen_ms": 0,            ## Server time spent generating tokens. Usually the bottleneck.
         "cached_tokens": 0,     ## Prompt tokens the server reused from its cache instead of re-reading
         "llm_calls": [],        ## Per model call: [{step, prompt_n, cache_n, prompt_ms, gen_n, gen_ms}]
+        "first_text_ms": None,  ## Streaming only: when the user saw the first words (None if not streamed)
         "steps": 0,
         "stop_reason": None,    ## "answer" | "max_steps"
         "output": None,
@@ -224,32 +297,31 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
                       latency_ms=round((time.perf_counter() - started) * 1000))
         return record
 
+    emit = None
+    if on_text is not None:
+        def emit(piece: str) -> None:
+            if record["first_text_ms"] is None:
+                record["first_text_ms"] = round((time.perf_counter() - started) * 1000)
+            on_text(piece)
+
     seen_calls = set()  ## (tool name, raw args) already executed this turn
     tools = tools_schema()
     if not tools:
         raise RuntimeError("No tools are available: call start_tools() first and check its problems.")
     for step in range(MAX_STEPS):
         record["steps"] = step + 1
-        ## Call the local LLM model with the system prompt, user input, and history.
+        ## Call the local LLM model with the whole conversation (system prompt first).
         try:
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=history,
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=1024, ## Hard cap on how long any single model response can be
-                temperature=TEMPERATURE,
-            )
-        except InternalServerError:
+            reply = call_model(history, tools, emit)
+        except InvalidToolCall:
             ## The server could not parse the model's tool call, so tell the model and let it retry.
             record["invalid_tool_json"] += 1
             history.append({"role": "user", "content": "Your last tool call was invalid JSON. Retry using only literal strings (no + or expressions)."})
             continue
 
-        if response.usage:
-            record["prompt_tokens"] += response.usage.prompt_tokens or 0
-            record["completion_tokens"] += response.usage.completion_tokens or 0
-        timings = (response.model_extra or {}).get("timings") or {}  ## llama-server extra: where time went
+        record["prompt_tokens"] += reply.prompt_tokens
+        record["completion_tokens"] += reply.completion_tokens
+        timings = reply.timings
         record["prompt_ms"] += round(timings.get("prompt_ms", 0))
         record["gen_ms"] += round(timings.get("predicted_ms", 0))
         record["cached_tokens"] += timings.get("cache_n", 0)
@@ -264,32 +336,29 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
             "gen_ms": round(timings.get("predicted_ms", 0)),
         })
 
-        ## Get the model's response message
-        message = response.choices[0].message
-
-        if not message.tool_calls:
+        if not reply.tool_calls:
             ## If the model did not call a tool, return its response as the final output.
-            history.append({"role": "assistant", "content": message.content})
-            return finish(message.content, "answer")
+            history.append({"role": "assistant", "content": reply.content})
+            return finish(reply.content, "answer")
+
+        if reply.content and emit:
+            emit("\n")  ## Text streamed before a tool call ("Let me check..."): start the answer on a new line
 
         ## If the model called a tool, add the assistant's tool call message to the history.
         history.append({
             "role": "assistant",
-            "content": message.content or "",
+            "content": reply.content or "",
             "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                }
-                for tc in message.tool_calls
+                {"id": tc["id"], "type": "function",
+                 "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                for tc in reply.tool_calls
             ],
         })
 
         ## Execute each tool call in the message and add the results to the history.
-        for tool_call in message.tool_calls:
-            tool_name = tool_call.function.name
-            tool_args = tool_call.function.arguments
+        for tool_call in reply.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["arguments"]
             t0 = time.perf_counter()
             ## Loop guard: evals showed the model retrying an identical failing call until MAX_STEPS.
             call_key = (tool_name, tool_args)
@@ -316,7 +385,7 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
             })
             history.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call["id"],
                 "name": tool_name,
                 "content": tool_result
             })
@@ -349,6 +418,7 @@ def chat(problems: list[str]):
     if not tools_schema():
         print("\nNo tools are available, so I can't run. See docs/mcp-setup.md (Troubleshooting).")
         return
+    print("Checking the model can use the tools (this also preloads the prompt, so replies start fast)...")
     problem = check_tools_reach_model()
     if problem:
         print(f"\nWARNING: {problem}\n")
@@ -375,13 +445,34 @@ def chat(problems: list[str]):
             print("Please enter a valid input.\n")
             continue
 
+        printer = ReplyPrinter()
         try:
-            response = run_agent(user_input, history)
-            print(f"{AGENT_NAME}: {response}\n")
+            response = run_agent(user_input, history, on_text=printer)
+            printer.finish(response)
         except KeyboardInterrupt:
             print("\n[Interrupted. Type 'quit' to exit.]\n")
         except Exception as e:
+            printer.finish(None)
             print(f"Error: {str(e)}\n")
+
+
+class ReplyPrinter:
+    ## Prints the reply as it streams in, so the first words show up in about a second instead
+    ## of after the whole reply has been written.
+    def __init__(self):
+        self.started = False
+
+    def __call__(self, piece: str) -> None:
+        if not self.started:
+            print(f"{AGENT_NAME}: ", end="")
+            self.started = True
+        print(piece, end="", flush=True)
+
+    def finish(self, response: str | None) -> None:
+        if self.started:
+            print("\n")
+        elif response is not None:
+            print(f"{AGENT_NAME}: {response}\n")  ## Nothing streamed (e.g. the max-steps message)
 
 if __name__ == "__main__":
     main()

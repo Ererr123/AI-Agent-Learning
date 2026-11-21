@@ -38,7 +38,7 @@ if errorlevel 1 (
 
 rem ---- 2. llama-server ----
 set "LLAMA_PID="
-curl -s -f -o nul "http://localhost:%PORT%/health" && (echo llama-server is already running on port %PORT%. & goto :run)
+curl -s -f -o nul "http://127.0.0.1:%PORT%/health" && (echo llama-server is already running on port %PORT%. & goto :run)
 
 set "LLAMA_SERVER="
 for /d %%D in ("%~dp0llama-*") do if exist "%%D\llama-server.exe" set "LLAMA_SERVER=%%D\llama-server.exe"
@@ -53,7 +53,7 @@ rem ---- 3. Wait until the model is loaded (/health answers 200 only when ready)
 echo Waiting for the model to load (a first run downloads it, which can take a while)...
 set /a WAITED=0
 :wait
-curl -s -f -o nul "http://localhost:%PORT%/health" && goto :run
+curl -s -f -o nul "http://127.0.0.1:%PORT%/health" && goto :run
 tasklist /fi "pid eq %LLAMA_PID%" | find "%LLAMA_PID%" >nul || (echo llama-server stopped while loading. Run it by hand to see the error: & echo   "%LLAMA_SERVER%" %LLAMA_ARGS% & goto :fail)
 rem 2-second pause (ping works even when "timeout" can't, e.g. with redirected input)
 ping -n 3 127.0.0.1 >nul
