@@ -28,7 +28,7 @@ BASE_URL = "http://localhost:8080/v1"  ## The base URL for the local LLM server
 MODEL = "Coco"     ## The model name to use for the local LLM server
 NOTES_DIR = Path("notes") ## the only folder the agent can read/write to
 MEMORY_FILE = Path("memory.md") ## Long-term memory: a plain markdown file you can open and edit any time
-PERSONA_FILE = Path(__file__).parent / "persona.md"  ## The agent's personality. Edit it freely; reloaded every turn.
+PERSONA_FILE = Path(__file__).parent / "persona.md"  ## The agent's personality. Edit it freely; reloaded each new conversation ('clear').
 MCP_CONFIG = Path(__file__).parent / "mcp_servers.json"              ## Which MCP servers/tools Coco uses (no secrets)
 MCP_LOCAL_CONFIG = Path(__file__).parent / "mcp_servers.local.json"  ## Your own additions/overrides (git-ignored)
 AGENT_NAME = "Coco"        ## Shown in the terminal next to the agent's replies
@@ -73,14 +73,17 @@ def load_persona() -> str:
         return ""  ## No persona file: plain assistant
 
 def build_system_prompt(memory: str | None = None) -> str:
-    ## Rebuilt every turn, so edits to memory.md or persona.md take effect immediately.
+    ## Built once per conversation (see run_agent_traced), so edits to memory.md or persona.md
+    ## take effect in the next conversation ('clear' or restart).
     ## The persona is included in prompt_version(), so evals show when the personality changed.
     if memory is None:
         memory = memory_for_prompt()
     persona = load_persona()
     return ((f"{persona}\n\n" if persona else "") +
             f"{SYSTEM_PROMPT_INTRO}\n\n"
-            f"Your memory of the user (use this to answer questions about them):\n{memory}\n\n"
+            "Your memory of the user, as of the start of this conversation (use this to answer questions "
+            "about them; remember/forget calls made since then are newer and win):\n"
+            f"{memory}\n\n"
             f"{SYSTEM_PROMPT}")
 
 ## 300s: a long tool result (e.g. 19 repos) plus a long reply can take the 30B model over 2 minutes
@@ -135,7 +138,9 @@ def check_tools_reach_model() -> str | None:
     tools = tools_schema()
     if not any(t["function"]["name"] == "current_time" for t in tools):
         return "No current_time tool is available (is the 'personal' MCP server running?)."
-    msgs = [{"role": "system", "content": build_system_prompt(memory="(Nothing yet.)")},
+    ## The real system prompt, with tools sent last: the server keeps this prefix cached, so the
+    ## first real turn only reads the user's message instead of ~1.5-5k tokens of prompt + tools.
+    msgs = [{"role": "system", "content": build_system_prompt()},
             {"role": "user", "content": "What time is it? Use the current_time tool."}]
     try:
         bare = client.chat.completions.create(model=MODEL, messages=msgs, max_tokens=1, temperature=0)
@@ -182,8 +187,14 @@ def run_agent(user_input: str, history: list[dict]) -> str:
 
 ## One user turn: call the model, run the tools it asks for, repeat until it answers.
 def run_agent_traced(user_input: str, history: list[dict]) -> dict:
-    ## history holds only the conversation; the system prompt (with fresh memory) is added per call.
+    ## history is the whole conversation. Its first message is the system prompt, built once when
+    ## the conversation starts and then frozen: llama-server reuses its cache only for an unchanged
+    ## prefix, so rebuilding it after every remember/forget made it re-read the entire conversation
+    ## (2 minutes with Gmail/GitHub on). Facts saved mid-conversation are already in the history
+    ## as the remember call itself. An empty history (new chat, 'clear', each eval case) rebuilds it.
     ## Returns a trace record: what happened at every step, for logs and evals.
+    if not history:
+        history.append({"role": "system", "content": build_system_prompt()})
     history.append({"role": "user", "content": user_input})
     started = time.perf_counter()
     record = {
@@ -200,6 +211,8 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
         "completion_tokens": 0,
         "prompt_ms": 0,         ## Server time spent reading the prompt (from llama-server timings)
         "gen_ms": 0,            ## Server time spent generating tokens. Usually the bottleneck.
+        "cached_tokens": 0,     ## Prompt tokens the server reused from its cache instead of re-reading
+        "llm_calls": [],        ## Per model call: [{step, prompt_n, cache_n, prompt_ms, gen_n, gen_ms}]
         "steps": 0,
         "stop_reason": None,    ## "answer" | "max_steps"
         "output": None,
@@ -221,7 +234,7 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
         try:
             response = client.chat.completions.create(
                 model=MODEL,
-                messages=[{"role": "system", "content": build_system_prompt()}] + history,
+                messages=history,
                 tools=tools,
                 tool_choice="auto",
                 max_tokens=1024, ## Hard cap on how long any single model response can be
@@ -239,6 +252,17 @@ def run_agent_traced(user_input: str, history: list[dict]) -> dict:
         timings = (response.model_extra or {}).get("timings") or {}  ## llama-server extra: where time went
         record["prompt_ms"] += round(timings.get("prompt_ms", 0))
         record["gen_ms"] += round(timings.get("predicted_ms", 0))
+        record["cached_tokens"] += timings.get("cache_n", 0)
+        ## prompt_n = tokens actually read this call, cache_n = tokens reused. A big prompt_n on a
+        ## follow-up step means the cache missed and the whole conversation was re-read.
+        record["llm_calls"].append({
+            "step": step + 1,
+            "prompt_n": timings.get("prompt_n", 0),
+            "cache_n": timings.get("cache_n", 0),
+            "prompt_ms": round(timings.get("prompt_ms", 0)),
+            "gen_n": timings.get("predicted_n", 0),
+            "gen_ms": round(timings.get("predicted_ms", 0)),
+        })
 
         ## Get the model's response message
         message = response.choices[0].message
@@ -342,7 +366,7 @@ def chat(problems: list[str]):
             break
         if user_input.lower() == "clear":
             history = []
-            print("History cleared (long-term memory kept).\n")
+            print("History cleared (long-term memory kept; memory.md and persona.md reloaded).\n")
             continue
         if user_input.lower() == "memory":
             print(load_memory() + "\n")

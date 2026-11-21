@@ -39,12 +39,17 @@ The model sees only these 7 tools. The filesystem server offers 16 tools, includ
 
 The model, port and context size are set at the top of `coco.bat`. If you close the window with the X instead of typing `quit`, llama-server keeps running, and the next launch reuses it.
 
+The speed settings in `coco.bat` (`-np 1`, `-fa off`, `GGML_OP_OFFLOAD_MIN_BATCH=512`) were measured on this PC and explained in [phase-4-speed.md](phase-4-speed.md). A llama-server you start yourself needs the same flags to be as fast. Its log goes to `logs\llama-server.log`.
+
+Memory and persona are read once per conversation, so the prompt stays cacheable. If you edit `memory.md` or `persona.md` by hand mid-chat, type `clear` (or restart) to load the changes. Facts Coco saves with `remember` count immediately.
+
 By hand, from `src/loop`:
 
 ```text
 python agent.py                              # chat; startup lists each server, its state, and the tools
 python -m unittest discover -s tests -v      # host/server tests: no model or accounts needed (~25s)
 python evals.py --repeat 3                   # agent evals against the real model
+python speed_bench.py [--personal]           # timed conversation: wall time, cache hits per turn
 ```
 
 At startup Coco prints `MCP server: notes: running (3 tools)` and the same for `personal`. Any problem is printed as a `WARNING:`. If no tools start, Coco stops and does not chat without tools.

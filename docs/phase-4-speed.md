@@ -4,7 +4,39 @@ Goal: make Coco much faster without making her answers worse. Every change is ch
 against the eval suite (20 cases × 3 repeats at temperature 0.9, currently 20/20) plus the
 Gmail/GitHub replays. **If the score drops, the change doesn't ship.**
 
-## Where the time goes today
+## Status
+
+Steps 1 and 2 are done, plus two server fixes found while measuring them. Same 7-turn conversation
+(`speed_bench.py --personal`, temperature 0):
+
+| Turn | Before | After |
+|---|---|---|
+| startup check | 115.4 s | 33.3 s |
+| greeting | 104.4 s | 1.1 s |
+| memory answer | 1.4 s | 1.0 s |
+| notes list+read | 13.6 s | 7.8 s |
+| remember | 122.7 s | 5.7 s |
+| follow-up | 1.8 s | 1.2 s |
+| gmail search | 56.8 s | 14.0 s |
+| github repos | 109.0 s | 25.7 s |
+| **total (7 turns)** | **409.7 s** | **56.5 s** |
+
+What did it, from biggest gain to smallest:
+1. **`-fa off`.** llama-server's default (`auto`) turns flash attention on, and on the RX 5700 XT
+   (Vulkan, no matrix cores) it's ~9× slower once the conversation is a few thousand tokens long:
+   a 1,390-token read at 6.5k depth ran at 17 t/s with it and 162 t/s without (`llama-bench -d 6500`).
+   This was the cause of the slow Gmail/GitHub turns even when the cache hit. Cost: generation deep
+   into a conversation drops from ~17 to ~14 t/s, far outweighed by the gain in reading speed.
+2. **Frozen system prompt per conversation + `-np 1`.** These removed the full re-reads. The server ran 4 slots,
+   and each `remember` rewrote the system prompt.
+3. **Warm start.** The startup check now uses the real system prompt, so the first turn finds it cached.
+4. **`GGML_OP_OFFLOAD_MIN_BATCH=512`.** Reads under 512 tokens stay on the CPU instead of copying
+   weights to the GPU: 64-token reads went from 29 to 84 t/s, and long reads didn't slow down.
+
+Takeaway 2 below turned out to be wrong: one server flag (flash attention) gave the biggest win.
+The benchmarks before that point had used `-fa 1` or shallow contexts, so they missed it.
+
+## Where the time went (before Phase 4)
 
 Measured on this PC (Ryzen 7 5700X, 32 GB RAM, RX 5700 XT 8 GB, Vulkan llama.cpp b12321).
 
@@ -45,28 +77,29 @@ Takeaways:
 ## Plan
 
 ### Step 1: Measure (no behavior change)
-- [ ] Log `cache_n` and `prompt_n` from llama-server's `timings` for each step, so every trace
+- [x] Log `cache_n` and `prompt_n` from llama-server's `timings` for each step, so every trace
       shows whether the cache was hit. Today's logs have to infer this from tokens/s.
-- [ ] Add `speed_bench.py`: a fixed set of turns run against the live server. The set covers a
+- [x] Add `speed_bench.py`: a fixed set of turns run against the live server. The set covers a
       greeting, a memory answer, notes list+read, a Gmail search and a GitHub repo list. Report
       wall time, time to first token, prompt/gen ms and cache hits per turn, and save the
       results as a baseline so later steps can be compared.
-- [ ] Start llama-server with `--log-file logs/llama-server.log`, so cache decisions can be read
+- [x] Start llama-server with `--log-file logs/llama-server.log`, so cache decisions can be read
       after the fact.
 
 ### Step 2: Stop re-reading what was already read (biggest win, no quality cost)
-- [ ] **`-np 1` in coco.bat.** With the auto default (several slots), a request can land on a slot
+- [x] **`-np 1` in coco.bat.** With the auto default (several slots), a request can land on a slot
       that doesn't hold Coco's conversation, which means a full re-read. Coco has one user, so
       one slot makes cache reuse deterministic.
-- [ ] **Freeze memory + persona for the session.** Memory sits in the middle of the system prompt,
+- [x] **Freeze memory + persona for the session.** Memory sits in the middle of the system prompt,
       so every `remember` invalidates the tool list and the whole conversation after it. Snapshot
       both when a chat starts and refresh them only on a new chat (or restart). Nothing is lost:
       a fact saved with `remember` is already in the conversation as the tool call. Hand edits
-      to memory.md mid-chat apply from the next chat; document that in the README.
-- [ ] **Let the startup check warm the cache.** `check_tools_reach_model()` uses a placeholder
+      to memory.md mid-chat apply from the next chat (documented in mcp-setup.md).
+- [x] **Let the startup check warm the cache.** `check_tools_reach_model()` uses a placeholder
       memory, so its work is thrown away. Use the real system prompt and send the with-tools request
       last. The first real turn then starts warm and skips reading ~4–5k tokens (~30–40 s cold).
-- [ ] Verify with the Step 1 benchmark: every non-first step should show a cache hit.
+- [x] Verify with the Step 1 benchmark: every non-first step should show a cache hit.
+- [x] (Found while measuring) `-fa off` and `GGML_OP_OFFLOAD_MIN_BATCH=512`. See Status.
 
 Expected: the 2–3 minute turns go away. Tool turns settle at roughly 10–25 s.
 
@@ -83,6 +116,7 @@ Expected: the 2–3 minute turns go away. Tool turns settle at roughly 10–25 s
       instead of the copy in the openwhispr cache.
       - It's a reasoning model: turn thinking off (`--chat-template-kwargs "{\"enable_thinking\":false}"`)
         or the extra thinking tokens cancel out the speed gain.
+      - Benchmark it with `-fa on` and `-fa off` at depth (`llama-bench -d 6000`): the 30B lesson.
       - Its hybrid (DeltaNet) architecture reuses prompt cache through context checkpoints, which
         are on by default in this build. Confirm with the `cache_n` logging that follow-up steps
         hit the cache.

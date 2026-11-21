@@ -14,6 +14,14 @@ set "MODEL=unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
 set "PORT=8080"
 set "CONTEXT=16384"
 set "MAX_WAIT_SECONDS=600"
+rem Only copy CPU-held weights to the GPU for reads of 512+ tokens. Below that the copy costs more than
+rem it saves: short reads (a user message, a small tool result) go ~3x faster, long ones are unchanged.
+set "GGML_OP_OFFLOAD_MIN_BATCH=512"
+rem -np 1: one server slot. Coco has one user; with several slots a request can land on a slot
+rem that doesn't hold the conversation, and the whole prompt is re-read (minutes, not seconds).
+rem -fa off: flash attention is ~9x SLOWER on this GPU (RX 5700 XT, no matrix cores) once a
+rem conversation is a few thousand tokens long (17 vs 162 tokens/s reading a tool result at 6.5k).
+set "LLAMA_ARGS=-hf %MODEL% --jinja -c %CONTEXT% --port %PORT% -np 1 -fa off --log-file logs\llama-server.log"
 
 rem Run from the repo root, so notes\, memory.md and logs\ are the ones here
 cd /d "%~dp0"
@@ -36,8 +44,9 @@ set "LLAMA_SERVER="
 for /d %%D in ("%~dp0llama-*") do if exist "%%D\llama-server.exe" set "LLAMA_SERVER=%%D\llama-server.exe"
 if not defined LLAMA_SERVER (echo Could not find llama-server.exe. Put the llama.cpp release folder ^(llama-...-bin-win-...^) next to coco.bat. & goto :fail)
 
+if not exist logs mkdir logs
 echo Starting llama-server: %MODEL%
-for /f %%P in ('powershell -NoProfile -Command "(Start-Process -FilePath '%LLAMA_SERVER%' -ArgumentList '-hf %MODEL% --jinja -c %CONTEXT% --port %PORT%' -WindowStyle Minimized -PassThru).Id"') do set "LLAMA_PID=%%P"
+for /f %%P in ('powershell -NoProfile -Command "(Start-Process -FilePath '%LLAMA_SERVER%' -ArgumentList '%LLAMA_ARGS%' -WindowStyle Minimized -PassThru).Id"') do set "LLAMA_PID=%%P"
 if not defined LLAMA_PID (echo Could not start llama-server. & goto :fail)
 
 rem ---- 3. Wait until the model is loaded (/health answers 200 only when ready) ----
@@ -45,7 +54,7 @@ echo Waiting for the model to load (a first run downloads it, which can take a w
 set /a WAITED=0
 :wait
 curl -s -f -o nul "http://localhost:%PORT%/health" && goto :run
-tasklist /fi "pid eq %LLAMA_PID%" | find "%LLAMA_PID%" >nul || (echo llama-server stopped while loading. Run it by hand to see the error: & echo   "%LLAMA_SERVER%" -hf %MODEL% --jinja -c %CONTEXT% --port %PORT% & goto :fail)
+tasklist /fi "pid eq %LLAMA_PID%" | find "%LLAMA_PID%" >nul || (echo llama-server stopped while loading. Run it by hand to see the error: & echo   "%LLAMA_SERVER%" %LLAMA_ARGS% & goto :fail)
 rem 2-second pause (ping works even when "timeout" can't, e.g. with redirected input)
 ping -n 3 127.0.0.1 >nul
 set /a WAITED+=2
