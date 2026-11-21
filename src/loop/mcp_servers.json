@@ -1,0 +1,93 @@
+{
+  "_readme": "MCP servers Coco starts. No secrets here: use \"${env:NAME}\" for tokens. Only tools listed under \"tools\" reach the model. Put personal additions in mcp_servers.local.json (git-ignored). See docs/mcp-setup.md.",
+  "servers": {
+    "notes": {
+      "description": "Official MCP filesystem server, limited to the notes folder. Reviewed version, pinned.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2.2.0", "{notes_dir}"],
+      "cwd": "{notes_dir}",
+      "log_payloads": true,
+      "untrusted_content": true,
+      "tools": {
+        "list_directory": {
+          "name": "list_notes",
+          "description": "List all the files in the notes folder. Call this first whenever the user names a note by topic (e.g. 'my shopping list') instead of its exact file name.",
+          "fixed_args": {"path": "."}
+        },
+        "read_text_file": {
+          "name": "read_file",
+          "description": "Read the contents of a file in the notes folder. Needs the exact file name: never guess one. If the user didn't give it, call list_notes first and read the file that matches.",
+          "hide_args": ["head", "tail"],
+          "arg_descriptions": {
+            "path": "Just the file name inside the notes folder, e.g. 'todo.txt'. Do not include 'notes/'."
+          }
+        },
+        "write_file": {
+          "name": "write_file",
+          "description": "Write the contents to a file in the notes folder.",
+          "arg_descriptions": {
+            "path": "Just the file name inside the notes folder, e.g. 'todo.txt'. Do not include 'notes/'.",
+            "content": "The exact literal text to save. Plain text only: no expressions, no string concatenation with +, no placeholders. If you need the current time, call current_time first and paste the result as plain text."
+          }
+        }
+      }
+    },
+    "personal": {
+      "description": "Coco's own memory server (personal_server.py). Only touches the memory file.",
+      "command": "{python}",
+      "args": ["{here}/personal_server.py", "--memory-file", "{memory_file}"],
+      "log_payloads": true,
+      "tools": {
+        "remember": {
+          "arg_descriptions": {
+            "fact": "One short sentence restating what the user told you about themselves.",
+            "category": "Preferences = how the user likes things done. Facts = things about the user. Decisions = choices the user made."
+          }
+        },
+        "forget": {
+          "arg_descriptions": {
+            "text": "A distinctive part of the memory's text, copied from the memory shown in your prompt."
+          }
+        },
+        "list_memories": {},
+        "current_time": {}
+      }
+    },
+    "github": {
+      "description": "Official GitHub MCP server v2.1.0 (github/github-mcp-server release binary, unzipped into tools/). Read-only four ways: read-only token permissions, --read-only, --tools, and the allowlist below. Off by default: enable in mcp_servers.local.json once the token is set.",
+      "enabled": false,
+      "command": "{root}/tools/github-mcp-server/github-mcp-server.exe",
+      "args": ["stdio", "--read-only", "--tools",
+               "get_me,search_repositories,get_file_contents,list_commits,list_issues,issue_read,list_pull_requests,pull_request_read"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${env:COCO_GITHUB_TOKEN}"},
+      "log_payloads": false,
+      "untrusted_content": true,
+      "drop_result_keys": ["id", "node_id", "html_url", "url", "avatar_url", "gravatar_id", "stargazers_count",
+                           "forks_count", "open_issues_count", "incomplete_results", "default_branch", "created_at"],
+      "tools": {
+        "get_me": {"name": "github_whoami", "description": "Get the user's own GitHub login and profile. It does not list repositories: use search_repositories with 'user:<login>' for that."},
+        "search_repositories": {
+          "description": "Search GitHub repositories. To list the USER'S OWN repositories, first call github_whoami, then use the query 'user:<their login>'. Without user: this searches all of GitHub."
+        },
+        "get_file_contents": {},
+        "list_commits": {},
+        "list_issues": {},
+        "issue_read": {},
+        "list_pull_requests": {},
+        "pull_request_read": {}
+      }
+    },
+    "gmail": {
+      "description": "Coco's own read-only Gmail server (gmail_server.py). Requests only the gmail.readonly scope; credentials live in %APPDATA%\\coco, outside the repo. Off by default: enable in mcp_servers.local.json after running gmail_server.py --authorize.",
+      "enabled": false,
+      "command": "{python}",
+      "args": ["{here}/gmail_server.py"],
+      "log_payloads": false,
+      "untrusted_content": true,
+      "tools": {
+        "search_emails": {},
+        "read_email": {}
+      }
+    }
+  }
+}
