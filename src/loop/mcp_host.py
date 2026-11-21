@@ -5,7 +5,8 @@ the server that advertised it.
 
 The agent loop stays synchronous. The MCP SDK is async, so the host runs one asyncio
 event loop on a background thread and keeps one long-lived task per server (each task
-owns its stdio subprocess and ClientSession from start to shutdown).
+owns its transport and ClientSession from start to shutdown). Local servers run as stdio
+subprocesses ("command"); remote ones are reached over MCP Streamable HTTP ("url", https only).
 
 Safety rules enforced here, whatever a server offers:
   - Only tools listed under a server's "tools" in the config reach the model (allowlist).
@@ -19,6 +20,7 @@ Safety rules enforced here, whatever a server offers:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -29,7 +31,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from urllib.parse import urlparse
+
 from mcp import ClientSession, StdioServerParameters, stdio_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from mcp.types import PaginatedRequestParams
 
 STARTUP_TIMEOUT_S = 60     ## First run of an npx server downloads it, so allow a while
@@ -74,6 +79,12 @@ def describe(error: BaseException) -> str:
         error = error.exceptions[0]
     text = str(error).strip()
     return f"{type(error).__name__}: {text}" if text else type(error).__name__
+
+
+@dataclass
+class HttpServerParameters:
+    url: str                 ## Remote MCP endpoint (Streamable HTTP)
+    headers: dict            ## e.g. an API key from ${env:...}; empty for public servers
 
 
 @dataclass
@@ -238,8 +249,10 @@ class MCPHost:
         text = self._render(result)
         if not result.is_error and server.spec.get("drop_result_keys"):
             text = self._drop_keys(text, set(server.spec["drop_result_keys"]))
-        if len(text) > MAX_RESULT_CHARS:
-            text = text[:MAX_RESULT_CHARS] + f"\n[...result cut off at {MAX_RESULT_CHARS} characters...]"
+        ## Per-server "max_result_chars" (e.g. docs servers) can only lower the global cap
+        limit = min(int(server.spec.get("max_result_chars", MAX_RESULT_CHARS)), MAX_RESULT_CHARS)
+        if len(text) > limit:
+            text = text[:limit] + f"\n[...result cut off at {limit} characters...]"
         if result.is_error:
             return fail(ERROR_PREFIX.sub("", text).strip() or "The tool reported an error.")
         if server.spec.get("untrusted_content", False):
@@ -260,12 +273,24 @@ class MCPHost:
             return os.environ[name]
         return ENV_REF.sub(env, value)
 
-    def _params(self, server: _Server) -> StdioServerParameters:
+    def _params(self, server: _Server) -> "StdioServerParameters | HttpServerParameters":
         spec = server.spec
-        if not isinstance(spec.get("command"), str):
-            raise ConfigError("no \"command\" configured")
         if not isinstance(spec.get("tools", {}), dict):
             raise ConfigError("\"tools\" must be an object of tool name -> settings")
+        if "url" in spec:
+            ## A remote server over MCP Streamable HTTP. HTTPS only, so nothing (including any
+            ## key in the headers) crosses the network in clear text; plain http only to this PC.
+            if "command" in spec:
+                raise ConfigError("set either \"command\" (local) or \"url\" (remote), not both")
+            url = self._expand(spec["url"])
+            parsed = urlparse(url)
+            if not (parsed.scheme == "https" or
+                    (parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1"))):
+                raise ConfigError(f"url must be https:// (plain http only for 127.0.0.1): {url}")
+            return HttpServerParameters(
+                url=url, headers={k: self._expand(v) for k, v in spec.get("headers", {}).items()})
+        if not isinstance(spec.get("command"), str):
+            raise ConfigError("no \"command\" (local server) or \"url\" (remote server) configured")
         return StdioServerParameters(
             command=self._expand(spec["command"]),
             args=[self._expand(a) for a in spec.get("args", [])],
@@ -273,13 +298,22 @@ class MCPHost:
             cwd=self._expand(spec["cwd"]) if spec.get("cwd") else None,
         )
 
-    async def _run(self, server: _Server, params: StdioServerParameters) -> None:
+    async def _run(self, server: _Server, params: "StdioServerParameters | HttpServerParameters") -> None:
         ## One task per server, for its whole life: anyio requires a session's context to be
         ## entered and exited in the same task.
         server.stop = asyncio.Event()
-        self._log(f"starting server '{server.name}': {params.command}")
         try:
-            async with stdio_client(params, errlog=self._errlog) as (read, write):
+            async with contextlib.AsyncExitStack() as stack:
+                if isinstance(params, HttpServerParameters):
+                    self._log(f"connecting to server '{server.name}': {params.url}")
+                    ## Our own client only when headers are needed (the SDK then leaves closing it to us)
+                    client = (await stack.enter_async_context(create_mcp_http_client(headers=params.headers))
+                              if params.headers else None)
+                    transport = streamable_http_client(params.url, http_client=client)
+                else:
+                    self._log(f"starting server '{server.name}': {params.command}")
+                    transport = stdio_client(params, errlog=self._errlog)
+                read, write = await stack.enter_async_context(transport)
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     server.tools = await self._list_tools(session)

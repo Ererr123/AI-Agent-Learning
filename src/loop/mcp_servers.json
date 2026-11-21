@@ -117,6 +117,66 @@
           "arg_descriptions": {"url": "The full http(s) URL of the page."}
         }
       }
+    },
+    "deepwiki": {
+      "description": "DeepWiki (Cognition), remote and free, no account: AI-written wikis of public GitHub repositories. Only ask_wiki_question is exposed; read_wiki_contents returns whole wikis, far too big for the context. Answers can take ~1 minute. Off by default.",
+      "enabled": false,
+      "url": "https://mcp.deepwiki.com/mcp",
+      "timeout": 120,
+      "log_payloads": true,
+      "untrusted_content": true,
+      "max_result_chars": 8000,
+      "tools": {
+        "ask_wiki_question": {
+          "name": "ask_repo_docs",
+          "description": "Ask how a PUBLIC open-source GitHub project works (its code, architecture, options), answered from DeepWiki's wiki of that repository. Not for the user's own repositories (use the GitHub tools) or general web questions. Can take up to a minute.",
+          "arg_descriptions": {
+            "repoName": "The repository as owner/repo, e.g. 'ggml-org/llama.cpp'.",
+            "question": "One specific question about that repository."
+          }
+        }
+      }
+    },
+    "context7": {
+      "description": "Context7 (Upstash), remote and free: current documentation and code examples for programming libraries. Works without a key at a low hourly rate limit; a free key raises it (see docs/mcp-setup.md). Queries go to Context7, so never put private data in them. Off by default.",
+      "enabled": false,
+      "url": "https://mcp.context7.com/mcp",
+      "timeout": 60,
+      "log_payloads": true,
+      "untrusted_content": true,
+      "max_result_chars": 8000,
+      "tools": {
+        "resolve-library-id": {
+          "name": "find_library",
+          "description": "Step 1 for questions about using a programming library or framework (e.g. 'how do I stream with the openai Python SDK'): find its Context7 library id. Then call read_library_docs with that id.",
+          "arg_descriptions": {
+            "libraryName": "The library or framework name, e.g. 'next.js' or 'openai python'.",
+            "query": "What the user wants to do with it, in a few words. No private data."
+          }
+        },
+        "query-docs": {
+          "name": "read_library_docs",
+          "description": "Step 2: read current docs and code examples for a library id from find_library (format '/org/project').",
+          "arg_descriptions": {
+            "libraryId": "The exact library id from find_library, e.g. '/vercel/next.js'.",
+            "query": "One specific topic to look up, e.g. 'streaming responses'. No private data."
+          }
+        }
+      }
+    },
+    "stackoverflow": {
+      "description": "Coco's own read-only Stack Overflow server (stackoverflow_server.py) on the public Stack Exchange API. Free and keyless (~300 requests/day per IP); a free app key in STACKEXCHANGE_KEY raises it to 10,000 (see docs/mcp-setup.md). Off by default.",
+      "enabled": false,
+      "command": "{python}",
+      "args": ["{here}/stackoverflow_server.py"],
+      "log_payloads": true,
+      "untrusted_content": true,
+      "tools": {
+        "search_stackoverflow": {
+          "description": "Search Stack Overflow for a programming error message or coding problem. Returns question ids, titles, scores and whether they have an accepted answer. Then read the best one with read_stackoverflow_answers."
+        },
+        "read_stackoverflow_answers": {}
+      }
     }
   }
 }

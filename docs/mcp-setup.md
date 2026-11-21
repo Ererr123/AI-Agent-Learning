@@ -11,7 +11,9 @@ mcp_host.py  (MCP client: starts servers, discovers tools, allowlist, routing, e
    |  MCP over stdio, one subprocess per server
    +-- notes:    @modelcontextprotocol/server-filesystem@2.2.0, limited to notes/
    +-- personal: personal_server.py, limited to memory.md
-   +-- (optional, off by default) github, gmail, web: see their sections below
+   +-- (optional, off by default) github, gmail, web, stackoverflow: see their sections below
+   |  MCP over HTTPS (remote, optional, off by default)
+   +-- deepwiki, context7
 ```
 
 | Model-facing tool | Server | Server's own tool |
@@ -93,6 +95,9 @@ Servers are defined in [`src/loop/mcp_servers.json`](../src/loop/mcp_servers.jso
 - **`log_payloads`** defaults to `false`: tool arguments and results are then written to `logs/` as `[not logged]`. Only `notes` and `personal` set it to `true`, which matches what Coco logged before MCP.
 - **`untrusted_content`** (set on notes, github and gmail) puts a label before each successful result. The label says the content was written by someone other than the user and that instructions inside it are not from the user. The `safety/injection_in_tool_result` eval checks that Coco reports on planted instructions instead of following them.
 - **`timeout`** is in seconds per call. The default is 30.
+- **Remote servers:** give `"url": "https://.../mcp"` (MCP Streamable HTTP) instead of `command`/`args`, plus optional `"headers"`, which accept `${env:NAME}` for keys. The URL must be `https://`; plain `http://` is allowed only for `127.0.0.1`. DeepWiki and Context7 are configured this way.
+- **`max_result_chars`** lowers the 40,000-character result cap for one server. The docs servers use 8,000, so one answer can't fill Coco's 16k-token context.
+- **`hide_args`** are also dropped from calls, so the model can't use an argument it was never shown.
 
 Changing the config or a server version changes the `prompt_version` in logs and evals, because the tool schemas are part of it.
 
@@ -110,7 +115,7 @@ Set `"enabled": false`, or delete its entry from the local file. Its subprocess 
 
 ## Security model
 
-- Each server is a separate subprocess with its own trust boundary. The model never sees commands, environment variables or tokens. It sees only tool names, descriptions and argument schemas.
+- Each local server is a separate subprocess with its own trust boundary. Remote servers (DeepWiki, Context7) are reached only over HTTPS. The model never sees commands, URLs, headers, environment variables or tokens. It sees only tool names, descriptions and argument schemas.
 - **Filesystem.** The official server is started with `notes/` as its only allowed directory, and with its working directory set to `notes/`, so plain file names resolve there. `../` paths and absolute paths outside `notes/` are denied by the server. `tests/test_mcp_host.py` and the `safety/*` evals check this.
 - **Memory.** `personal_server.py` takes the memory file path from its command line. No tool accepts a path. `forget` refuses to choose between several matching memories. Disk errors are returned as tool errors.
 - **Failures are never successes.** Startup failures, unknown or non-allowlisted tools, bad JSON, server errors, timeouts and crashes all return `Error: ...` with `ok=False`. Results over 40,000 characters are cut off and marked.
@@ -207,6 +212,26 @@ Search results and pages are labeled as untrusted, like emails, because web page
 
 **Limits:** your queries go to the search engines from your IP address, but not to any account. If an engine rate-limits or shows a CAPTCHA, SearXNG pauses that engine for a while and uses the others. Results can be thinner then, but for one person's use it rarely happens.
 
+## Coding help: DeepWiki, Context7, Stack Overflow (free)
+
+Three optional servers for programming questions. All are free, need no account, and are off by default.
+
+| Server | Model-facing tools | What it's for | Free limit |
+|---|---|---|---|
+| `deepwiki` (remote, [mcp.deepwiki.com](https://docs.devin.ai/work-with-devin/deepwiki-mcp)) | `ask_repo_docs` | How a public open-source GitHub project works | None published. Answers take 5–60 s. |
+| `context7` (remote, [mcp.context7.com](https://context7.com)) | `find_library`, `read_library_docs` | Current docs and code examples for a library | A low hourly limit without a key. A free key raises it. |
+| `stackoverflow` (Coco's own [`stackoverflow_server.py`](../src/loop/stackoverflow_server.py)) | `search_stackoverflow`, `read_stackoverflow_answers` | Error messages and coding problems | ~300 requests/day per IP without a key, 10,000 with a free key |
+
+- **Not used:** MCPHub, because Coco's host already does this job and applies its rules per server. DeepWiki's `read_wiki_contents`, which returns whole wikis. The official Stack Overflow MCP server, which needs a Stack Exchange login and allows 100 calls/day.
+- **Privacy:** questions to DeepWiki and Context7 go to those companies, and Stack Overflow searches go to the public API. Results are labeled untrusted and capped at 8,000 characters.
+- **Optional free keys**, in `mcp_servers.local.json`. Set the environment variables first (user env vars, like the GitHub token):
+  ```json
+  "context7": {"enabled": true, "headers": {"CONTEXT7_API_KEY": "${env:CONTEXT7_API_KEY}"}},
+  "stackoverflow": {"enabled": true, "env": {"STACKEXCHANGE_KEY": "${env:STACKEXCHANGE_KEY}"}}
+  ```
+  Context7 keys come from [context7.com](https://context7.com) and start with `ctx7sk`. Stack Exchange app keys come from [stackapps.com](https://stackapps.com/apps/oauth/register) and aren't secret.
+- **Evals:** `python evals.py --servers web,deepwiki,context7,stackoverflow --repeat 3` runs the whole suite with all of them on, plus the `dev/` and `web/` cases.
+
 ## Enable the services
 
 Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes the keys it names:
@@ -216,7 +241,10 @@ Create `src/loop/mcp_servers.local.json`. It is git-ignored, and it only changes
   "servers": {
     "github": {"enabled": true},
     "gmail": {"enabled": true},
-    "web": {"enabled": true}
+    "web": {"enabled": true},
+    "deepwiki": {"enabled": true},
+    "context7": {"enabled": true},
+    "stackoverflow": {"enabled": true}
   }
 }
 ```

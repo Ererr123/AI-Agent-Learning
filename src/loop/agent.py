@@ -298,7 +298,8 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
         "cached_tokens": 0,     ## Prompt tokens the server reused from its cache instead of re-reading
         "llm_calls": [],        ## Per model call: [{step, prompt_n, cache_n, prompt_ms, gen_n, gen_ms}]
         "first_text_ms": None,  ## Streaming only: when the user saw the first words (None if not streamed)
-        "forced_tool_call": False,  ## The user said "remember ...": step 1 had to call a tool
+        "remember_guard": False,    ## The user said "remember ...": a reply without remember is retried
+        "guard_retries": 0,         ## Replies thrown away because they claimed to save without saving
         "steps": 0,
         "stop_reason": None,    ## "answer" | "max_steps"
         "output": None,
@@ -321,17 +322,23 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
     tools = tools_schema()
     if not tools:
         raise RuntimeError("No tools are available: call start_tools() first and check its problems.")
-    ## Guard: evals showed the model replying "Got it, I'll remember" WITHOUT calling remember
-    ## (worse with more tools loaded), so nothing was saved. When the user plainly asks to remember
-    ## something, the first call must be a tool call; given the request, that's remember.
-    must_call_tool = asks_to_remember(user_input) and any(t["function"]["name"] == "remember" for t in tools)
-    record["forced_tool_call"] = must_call_tool
+    ## Guard: evals showed the model replying "Got it, I'll remember" (even "(remembered) ✅") WITHOUT
+    ## calling remember, worse with more tools loaded, so nothing was saved. tool_choice="required"
+    ## isn't enforced by llama-server here, so: when the user plainly asks to remember something,
+    ## replies are held back (not streamed) until remember has been called. A reply that skips it is
+    ## thrown away and asked again with a one-off note (not kept in the history), at most twice.
+    guard = asks_to_remember(user_input) and any(t["function"]["name"] == "remember" for t in tools)
+    record["remember_guard"] = guard
+    saved = False
     for step in range(MAX_STEPS):
         record["steps"] = step + 1
+        holding = guard and not saved
+        nudge = ([{"role": "user", "content": "(Note from the app, not the user: nothing has been saved yet. "
+                   "Call the remember tool now with what the user asked you to remember.)"}]
+                 if holding and record["guard_retries"] else [])
         ## Call the local LLM model with the whole conversation (system prompt first).
         try:
-            reply = call_model(history, tools, emit,
-                               tool_choice="required" if must_call_tool and step == 0 else "auto")
+            reply = call_model(history + nudge, tools, None if holding else emit)
         except InvalidToolCall:
             ## The server could not parse the model's tool call, so tell the model and let it retry.
             record["invalid_tool_json"] += 1
@@ -356,6 +363,10 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
         })
 
         if not reply.tool_calls:
+            if holding and record["guard_retries"] < 2:
+                ## Claimed (or skipped) saving without calling remember: drop this reply, ask again
+                record["guard_retries"] += 1
+                continue
             ## If the model did not call a tool, return its response as the final output.
             history.append({"role": "assistant", "content": reply.content})
             return finish(reply.content, "answer")
@@ -391,6 +402,8 @@ def run_agent_traced(user_input: str, history: list[dict], on_text=None) -> dict
                 seen_calls.add(call_key)
                 result = host.call(tool_name, tool_args)  ## Routed to the MCP server that offers it
                 tool_result, server, ok, log_payloads = result.text, result.server, result.ok, result.log_payloads
+            if tool_name == "remember":
+                saved = True  ## Tried (a failure is reported honestly by the model): the guard is done
             record["tool_calls"].append({
                 "step": step + 1,
                 "name": tool_name,
